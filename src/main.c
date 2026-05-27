@@ -273,11 +273,21 @@ int main(void)
 	xil_printf("Hello from Zybo Z7-20\r\n");
 
 	pmu_init();
-	xil_printf("PMU initialised\r\n");
+	l2_init();
+	xil_printf("PMU and PL310 L2 counters initialised\r\n");
 
 	/* Snapshot before */
 	pmu_counts_t before, after;
+	l2_counts_t l2b, l2a;
+
+	uint32_t l2_id = *(volatile uint32_t *)(0xF8F02000UL + 0x000);
+	uint32_t l2_ctrl = *(volatile uint32_t *)(0xF8F02000UL + 0x100);
+	xil_printf("PL310 Cache ID   : 0x%08lX\r\n", (unsigned long)l2_id);
+	xil_printf("PL310 Ctrl (en?) : 0x%08lX\r\n", (unsigned long)l2_ctrl);
+
+	l2_reset();
 	pmu_read_all(&before);
+	l2_read(&l2b);
 
 	/* Do something that definitely causes cache activity */
 	volatile float buf[1024];
@@ -287,15 +297,16 @@ int main(void)
 
 	/* Snapshot after */
 	pmu_read_all(&after);
+	l2_read(&l2a);
 
-	xil_printf("L1 access delta : %lu\r\n",
+	xil_printf("L1 access delta   : %lu\r\n",
 	               (unsigned long)(after.l1d_access - before.l1d_access));
-	xil_printf("L1 miss delta   : %lu\r\n",
+	xil_printf("L1 miss delta     : %lu\r\n",
 	               (unsigned long)(after.l1d_miss - before.l1d_miss));
-	xil_printf("L2 access delta : %lu\r\n",
-	               (unsigned long)(after.l2d_access - before.l2d_access));
-	xil_printf("L2 miss delta   : %lu\r\n",
-	               (unsigned long)(after.l2d_miss - before.l2d_miss));
+	xil_printf("L2 access (DRREQ) : %lu\r\n",
+	               (unsigned long)(l2a.drreq - l2b.drreq));
+	xil_printf("L2 hit (DRHIT)    : %lu\r\n",
+	               (unsigned long)(l2a.drhit - l2b.drhit));
 
 	    while(1);
 	    return 0;
