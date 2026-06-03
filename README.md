@@ -61,10 +61,13 @@ project/
 ```
 
 ---
+## Block Design
 
 <img width="1525" height="718" alt="image" src="https://github.com/user-attachments/assets/cb76e06e-88a4-4636-a039-9e09c2df7b6c" />
 
+```
 
+---
 ## DDR Memory Map
 
 | Buffer  | Base Address | Size | Purpose          |
