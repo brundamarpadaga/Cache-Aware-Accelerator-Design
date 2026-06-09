@@ -21,6 +21,27 @@
 
 #include <stdint.h>
 
+
+/* ── PL310 L2 Cache Controller Event Counters ────────────────────────────
+ * On Zynq-7000 the L2 is a standalone PL310, not wired into the Cortex-A9
+ * PMU.  Read it via MMIO at the L2CC base address (UG585 Table 4-1).
+ *
+ * CTR0 → DRREQ  (data read requests  = total L2 data accesses)
+ * CTR1 → DRHIT  (data read hits      = L2 hits)
+ * miss rate = (DRREQ - DRHIT) / DRREQ
+ * ─────────────────────────────────────────────────────────────────────── */
+
+#define L2CC_BASE          0xF8F02000UL
+#define L2CC_ECNTR_CTRL    (*(volatile uint32_t *)(L2CC_BASE + 0x200))
+#define L2CC_ECFGR1        (*(volatile uint32_t *)(L2CC_BASE + 0x204))
+#define L2CC_ECFGR0        (*(volatile uint32_t *)(L2CC_BASE + 0x208))
+#define L2CC_ECNTR1        (*(volatile uint32_t *)(L2CC_BASE + 0x20C))
+#define L2CC_ECNTR0        (*(volatile uint32_t *)(L2CC_BASE + 0x210))
+
+/* PL310 event source IDs */
+#define PL310_EVT_DRHIT    0x2U   /* data read hit                    */
+#define PL310_EVT_DRREQ    0x3U   /* data read request (access)       */
+
 /* ── Event IDs ──────────────────────────────────────────────────────────── */
 #define PMU_EVT_L1D_MISS     0x03U   /* L1 data cache refill (miss→linefill)  */
 #define PMU_EVT_L1D_ACCESS   0x04U   /* L1 data cache access                  */
@@ -45,6 +66,12 @@ typedef struct {
     uint32_t l2d_miss;
     uint32_t l2d_access;
 } pmu_counts_t;
+
+typedef struct {
+    uint32_t drreq;   /* total L2 data read accesses */
+    uint32_t drhit;   /* L2 data read hits           */
+} l2_counts_t;
+
 
 /* ── CP15 register accessors ────────────────────────────────────────────── */
 
@@ -79,6 +106,28 @@ static inline uint32_t _pmu_rd_cnt(void)
     uint32_t v;
     __asm__ volatile("MRC p15, 0, %0, c9, c13, 2" : "=r"(v));
     return v;
+}
+
+static inline void l2_init(void)
+{
+    /* Reset both counters, keep disabled */
+    L2CC_ECNTR_CTRL = 0x3U;          /* reset CTR0 and CTR1           */
+    L2CC_ECFGR0 = PL310_EVT_DRREQ;   /* CTR0 counts data read requests*/
+    L2CC_ECFGR1 = PL310_EVT_DRHIT;   /* CTR1 counts data read hits    */
+    L2CC_ECNTR_CTRL = 0x1U;          /* enable counting               */
+}
+
+static inline void l2_reset(void)
+{
+    /* Reset without disabling */
+    L2CC_ECNTR_CTRL = 0x3U;
+    L2CC_ECNTR_CTRL = 0x1U;
+}
+
+static inline void l2_read(l2_counts_t *c)
+{
+    c->drreq = L2CC_ECNTR0;
+    c->drhit = L2CC_ECNTR1;
 }
 
 /* ── Public API ─────────────────────────────────────────────────────────── */
