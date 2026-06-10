@@ -46,7 +46,8 @@ The benchmark uses matrix multiplication as the workload, sweeping matrix size f
 
 ## Block Design
 
-![Vivado Block Design](https://github.com/user-attachments/assets/cb76e06e-88a4-4636-a039-9e09c2df7b6c)
+<img width="1617" height="727" alt="image" src="https://github.com/user-attachments/assets/595d0738-5c45-4932-bde7-8bbb91553853" />
+
 
 ### Port Roles
 
