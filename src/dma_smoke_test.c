@@ -3,36 +3,36 @@
  * @brief AXI DMA loopback smoke test for ACP and HP0 memory paths.
  *
  * @details
- * This file validates the AXI DMA hardware paths on the Zybo Z7-20 before
- * running the full coherency benchmark. It performs memory-to-memory DMA
- * transfers using both the ACP (coherent) and HP0 (non-coherent) ports and
- * verifies data integrity by comparing source and destination buffers.
+ * Validates the AXI DMA hardware paths on the Zybo Z7-20 before the full
+ * coherency benchmark. Three tests are run in sequence:
  *
- * Three tests are run in sequence:
+ *  1. ACP read path  — PS fills SRC (data dirty in L1/L2, NOT flushed to DDR).
+ *                      DMA MM2S reads SRC via ACP — SCU snoops L1/L2 cache.
+ *                      DMA S2MM writes DST via HP0 (hardwired in block design).
+ *                      PS invalidates DST before reading (HP0 bypassed SCU).
+ *                      Proves: SCU serves dirty cache lines to DMA without flush.
  *
- *  1. ACP loopback  — PS fills source, DMA reads via ACP (coherent),
- *                     DMA writes result via ACP. No cache management needed.
+ *  2. HP0 read path  — PS fills SRC and flushes to DDR before DMA reads.
+ *                      DMA MM2S reads SRC via ACP (but DDR = cache after flush).
+ *                      DMA S2MM writes DST via HP0.
+ *                      PS invalidates DST before reading.
+ *                      Proves: explicit flush + invalidate discipline works.
  *
- *  2. HP0 loopback  — PS fills source, flushes cache to DDR, DMA reads via
- *                     HP0 (non-coherent), DMA writes result via HP0.
- *                     PS invalidates before reading result.
- *
- *  3. Stale data    — Deliberate omission of cache flush on HP0 path.
- *                     Confirms that skipping the flush causes silent data
- *                     corruption — the DMA reads stale DDR, not the PS's
- *                     cached values.
- *
- * Expected UART output:
- * @code
- *   [SMOKE] ACP loopback  (N=256): PASS
- *   [SMOKE] HP0 loopback  (N=256): PASS
- *   [SMOKE] HP0 stale data test  : FAIL (expected — stale data confirmed)
- *   [SMOKE] All tests complete.
- * @endcode
+ *  3. Stale data     — PS fills SRC with new values but deliberately omits flush.
+ *                      DMA MM2S reads SRC via ACP — reads stale DDR values.
+ *                      DMA S2MM writes stale data to DST via HP0.
+ *                      Compare expected (new cache values) vs actual (stale DDR).
+ *                      Proves: omitting flush on the read path causes corruption.
  *
  * @note
- * DMA registers are at 0x40400000 (XPAR_AXI_DMA_0_BASEADDR).
- * Verify this matches your xparameters.h after importing Member A's .xsa.
+ * Hardware port mapping (Zybo Z7-20 block design):
+ *   MM2S memory port → AXI Protocol Converter → S_AXI_ACP  (DMA reads)
+ *   S2MM memory port → AXI Protocol Converter → S_AXI_HP0  (DMA writes)
+ * S2MM always writes via HP0 regardless of which test is running.
+ * DST must always be invalidated after transfer before PS reads it.
+ *
+ * S2MM must be armed before MM2S — MM2S pushes data onto the AXI stream
+ * immediately and stalls if S2MM is not already waiting to receive.
  *
  * @board  Digilent Zybo Z7-20 (XC7Z020-1CLG400C)
  * @tool   Vitis 2022.2, arm-none-eabi-gcc
@@ -72,11 +72,19 @@ static XAxiDma dma;
  * @brief Initialise the AXI DMA driver in simple (non-scatter-gather) mode.
  *
  * @details
- * Looks up the DMA configuration from xparameters.h, initialises the driver
- * instance, and disables all interrupts (polling mode is used throughout the
- * smoke test to keep the code self-contained).
+ * Looks up the DMA configuration from xparameters.h using the device ID
+ * defined by the .xsa export, initialises the driver instance, and disables
+ * all interrupts. Polling mode is used throughout to keep the smoke test
+ * self-contained without requiring an interrupt controller setup.
  *
- * @return XST_SUCCESS on success, XST_FAILURE if config lookup or init fails.
+ * Prints DMA configuration to UART on success for verification:
+ * base address, scatter-gather mode, MM2S/S2MM max transfer lengths,
+ * and the SMOKE_BYTES value that will be used in each test.
+ *
+ * @return XST_SUCCESS on success.
+ * @return XST_FAILURE if the device ID is not found in xparameters.h
+ *         or if driver initialisation fails — check that the .xsa was
+ *         correctly imported and the platform was rebuilt after .xsa update.
  */
 static int dma_init(void)
 {
@@ -115,15 +123,17 @@ static int dma_init(void)
  * @brief Fill a buffer with a deterministic float pattern.
  *
  * @details
- * Each element is set to (seed + index × 0.001). This gives a unique,
- * predictable value at every position that can be verified after transfer.
- * Writing through the volatile pointer ensures the compiler actually
- * stores to DDR-mapped addresses rather than optimising the loop away.
+ * Each element is set to (seed + index × 0.001). Using a unique seed per
+ * test ensures residual data from a previous transfer cannot mask a failure
+ * by accidentally matching the new expected values.
  *
- * @param buf   Pointer to the target buffer.
- * @param count Number of float elements to fill.
- * @param seed  Starting value — use different seeds for different tests
- *              so residual data from a previous run cannot mask a failure.
+ * The volatile pointer prevents the compiler from optimising the loop away,
+ * ensuring every store reaches the cache and eventually DDR.
+ *
+ * @param buf    Pointer to the target buffer in DDR.
+ * @param count  Number of float elements to fill.
+ * @param seed   Starting value. Use distinct seeds across tests:
+ *               ACP test = 1.0f, HP0 test = 2.0f, stale test = 99.0f.
  */
 static void buf_fill(volatile float *buf, uint32_t count, float seed)
 {
@@ -132,14 +142,17 @@ static void buf_fill(volatile float *buf, uint32_t count, float seed)
 }
 
 /**
- * @brief Zero a buffer.
+ * @brief Zero a destination buffer before each test.
  *
  * @details
- * Clears the destination before each test so a false PASS cannot occur
- * from a previous transfer leaving correct data in place.
+ * Clears DST to 0.0f before each transfer so a false PASS cannot occur
+ * from a previous test leaving correct data in place. The zeros also serve
+ * as a recognisable sentinel — if DST reads back 0x00000000 after a transfer,
+ * the PS cache was not invalidated and is returning the cached zeros rather
+ * than the DMA result.
  *
- * @param buf   Pointer to the target buffer.
- * @param count Number of float elements to zero.
+ * @param buf    Pointer to the target buffer in DDR.
+ * @param count  Number of float elements to zero.
  */
 static void buf_clear(volatile float *buf, uint32_t count)
 {
@@ -151,14 +164,18 @@ static void buf_clear(volatile float *buf, uint32_t count)
  * @brief Compare source and destination buffers element by element.
  *
  * @details
- * Returns the number of mismatches found. A return value of 0 means
- * the transfer was bit-perfect. On the first mismatch the index and
- * values are printed to UART to aid debugging.
+ * On the first mismatch, prints the element index and both values in hex
+ * to UART. Hex is used rather than float to avoid ambiguity from floating
+ * point printing — 0x3F800000 is unambiguously 1.0f, while printf %f may
+ * round or truncate. Only the first mismatch is printed to avoid flooding
+ * the UART on large failure counts.
  *
- * @param src   Source buffer.
- * @param dst   Destination buffer to compare against source.
- * @param count Number of float elements to compare.
- * @return      Number of mismatched elements (0 = PASS).
+ * @param src    Source buffer — the reference values written by buf_fill().
+ * @param dst    Destination buffer — the values written by the DMA.
+ * @param count  Number of float elements to compare.
+ *
+ * @return 0 if all elements match (transfer was bit-perfect).
+ * @return Positive integer indicating the number of mismatched elements.
  */
 static uint32_t buf_compare(volatile float *src,
                              volatile float *dst,
@@ -185,23 +202,56 @@ static uint32_t buf_compare(volatile float *src,
  * @brief Poll both DMA channels until idle or timeout.
  *
  * @details
- * Polls MM2S (memory-to-stream, DMA read) and S2MM (stream-to-memory,
- * DMA write) channels separately. Returns -1 if either channel does not
- * become idle within DMA_TIMEOUT iterations, which indicates a hardware
- * hang — check ILA waveforms and AXI address map.
+ * Polls MM2S (memory-to-stream) and S2MM (stream-to-memory) channels
+ * simultaneously in a single loop. Both must be idle before the function
+ * returns success — a transfer is not complete until the S2MM write has
+ * fully committed to DDR.
  *
- * @return 0 on success, -1 on timeout.
+ * If timeout occurs, prints a diagnostic message directing the user to
+ * check ILA waveforms. Common causes of timeout:
+ *   - AXI stream loopback not connected in block design
+ *   - S2MM not armed before MM2S (stream stall with no receiver)
+ *   - AXI address map error (DMA accessing unmapped region)
+ *   - Protocol converter misconfiguration
+ *
+ * @return  0 on success (both channels idle).
+ * @return -1 on timeout (DMA did not complete within DMA_TIMEOUT iterations).
  */
 static int dma_wait_done(void)
 {
+    /* S2MM Status Register offset 0x34 — AXI DMA PG021 Table 2-21
+     * Bit[1] = Idle: set when S2MM channel has completed and all
+     * write data has been committed through the AXI interconnect.    */
+    #define DMA_MM2S_SR  (XPAR_AXI_DMA_0_BASEADDR + 0x04U)
+    #define DMA_S2MM_SR  (XPAR_AXI_DMA_0_BASEADDR + 0x34U)
+    #define DMA_IDLE_BIT (1U << 1)
+
+    /* Step 1: Wait for MM2S Idle */
     for (uint32_t i = 0; i < DMA_TIMEOUT; ++i) {
-        if (!XAxiDma_Busy(&dma, XAXIDMA_DMA_TO_DEVICE) &&
-            !XAxiDma_Busy(&dma, XAXIDMA_DEVICE_TO_DMA))
-            return 0;
+        if (Xil_In32(DMA_MM2S_SR) & DMA_IDLE_BIT)
+            break;
+        if (i == DMA_TIMEOUT - 1) {
+            xil_printf("[DMA] ERROR: MM2S idle timeout\r\n");
+            return -1;
+        }
     }
-    xil_printf("[DMA] ERROR: timeout — DMA did not complete\r\n");
-    xil_printf("[DMA] Check: ILA waveforms, AXI address map, ACP/HP connections\r\n");
-    return -1;
+
+    /* Step 2: Wait for S2MM Idle — only set after all writes
+     * drain through the AXI write buffer into DDR               */
+    for (uint32_t i = 0; i < DMA_TIMEOUT; ++i) {
+        if (Xil_In32(DMA_S2MM_SR) & DMA_IDLE_BIT)
+            break;
+        if (i == DMA_TIMEOUT - 1) {
+            xil_printf("[DMA] ERROR: S2MM idle timeout\r\n");
+            return -1;
+        }
+    }
+
+    /* Step 3: DSB — ARM memory barrier ensures all AXI writes
+     * visible to PS before invalidate and compare               */
+    __asm__ volatile("dsb" ::: "memory");
+
+    return 0;
 }
 
 /* ─────────────────────────────────────────────────────────────────────────────
@@ -209,23 +259,35 @@ static int dma_wait_done(void)
  * ───────────────────────────────────────────────────────────────────────────*/
 
 /**
- * @brief ACP loopback smoke test — coherent path, no cache management.
+ * @brief ACP read path smoke test — SCU cache snooping validation.
  *
  * @details
- * Demonstrates that when the PL accesses memory via the ACP port, the
- * Snoop Control Unit (SCU) satisfies DMA reads directly from the ARM L1/L2
- * cache — even though the PS never flushed the data to DDR. The DMA sees
- * the most recent PS-written values without any explicit cache operation.
+ * Validates that the ACP port correctly participates in ARM cache coherency.
+ * The PS fills SRC without flushing to DDR — data stays dirty in L1/L2.
+ * The DMA reads SRC via ACP; the SCU snoops the PS cache and serves the
+ * dirty cache lines directly, so DDR is never read for the source data.
+ *
+ * Hardware port mapping for this test:
+ *   MM2S reads  SRC via ACP  — SCU snoops L1/L2, returns cached values
+ *   S2MM writes DST via HP0  — writes directly to DDR, bypasses SCU
+ *
+ * Because S2MM always uses HP0, DST must be invalidated after transfer.
+ * The PS cache still holds buf_clear() zeros for DST — invalidating forces
+ * the next read to fetch the DMA result from DDR.
  *
  * Transfer sequence:
- *  1. PS fills SRC (data stays dirty in L1/L2).
- *  2. DMB barrier — ensures all stores are globally visible.
- *  3. DMA MM2S reads SRC via ACP — SCU snoops L1/L2, returns fresh data. memory mapped 2 stream
- *  4. DMA S2MM writes DST via ACP — SCU updates PS cache with result.
- *  5. PS reads DST — no invalidate needed, SCU maintained coherency.
- *  6. Compare SRC vs DST.
+ *  1. buf_fill(SRC, seed=1.0f)  — data dirty in L1/L2, NOT in DDR
+ *  2. buf_clear(DST)            — zeros in PS cache and DDR
+ *  3. DMB + DSB barriers        — stores globally visible before DMA starts
+ *  4. S2MM armed at DST         — receiver ready before MM2S sends
+ *  5. MM2S started at SRC       — SCU snoops, serves 1.0f from cache
+ *  6. dma_wait_done()           — both channels idle
+ *  7. InvalidateRange(DST)      — discard cached zeros, force DDR read
+ *  8. buf_compare(SRC, DST)     — SRC from cache (1.0f) vs DST from DDR
  *
- * @return 0 on PASS, -1 on DMA timeout, positive integer = mismatch count.
+ * @return  0 on PASS (all elements match).
+ * @return -1 on DMA timeout or transfer error.
+ * @return Positive integer indicating mismatch count on data error.
  */
 static int smoke_test_acp(void)
 {
@@ -237,21 +299,52 @@ static int smoke_test_acp(void)
     buf_clear(SMOKE_DST, SMOKE_N * SMOKE_N);
     xil_printf("[SMOKE] SRC filled, DST cleared\r\n");
 
+    /* Flush DST zeros to DDR — prevents cache writeback from
+     * overwriting DMA result after S2MM writes to DDR via HP0 */
+    Xil_DCacheFlushRange((UINTPTR)SMOKE_DST_BASE, SMOKE_BYTES);
+
+    /* ── Snooping verification ───────────────────────────────────────────
+     * Goal: prove SRC DDR has stale values while SRC cache has fresh 1.0f.
+     * If DMA still passes after this, SCU must be snooping cache.
+     *
+     * Step A: Read what DDR currently holds for SRC (bypass cache)      */
+    Xil_DCacheInvalidateRange((UINTPTR)SMOKE_SRC_BASE, SMOKE_BYTES);
+    volatile float *src_ptr = (volatile float *)SMOKE_SRC_BASE;
+    float ddr_val = src_ptr[0];   /* cache miss → fetches from DDR */
+    xil_printf("[VERIFY] SRC[0] from DDR   = 0x%08lX\r\n",
+               (unsigned long)*(uint32_t*)&ddr_val);
+    /* Expected: NOT 0x3F800000 (1.0f) — DDR is stale               */
+
+    /* Step B: Re-fill SRC into cache — DDR still has stale value    */
+    buf_fill(SMOKE_SRC, SMOKE_N * SMOKE_N, 1.0f);
+    float cache_val = src_ptr[0]; /* cache hit → gets fresh 1.0f   */
+    xil_printf("[VERIFY] SRC[0] from cache = 0x%08lX\r\n",
+               (unsigned long)*(uint32_t*)&cache_val);
+    /* Expected: 0x3F800000 (1.0f) — cache has fresh value           */
+
+    xil_printf("[VERIFY] If DDR != 1.0f but test passes → SCU snooping confirmed\r\n");
+    xil_printf("[VERIFY] If DDR == 1.0f → eviction occurred, result inconclusive\r\n");
+    /* ── End verification ─────────────────────────────────────────── */
 
     /* Step 2: DMB — all preceding stores complete before DMA starts */
-
-    /* Flush: push dirty lines to DDR so DMA engine has clean view */
-    Xil_DCacheFlushRange((UINTPTR)SMOKE_SRC_BASE, SMOKE_BYTES);
-    Xil_DCacheFlushRange((UINTPTR)SMOKE_DST_BASE, SMOKE_BYTES);
+    DMB();
 
     /* DSB: wait for all cache maintenance to complete */
     DSB();
-    xil_printf("[SMOKE] Barriers and flush done\r\n");
+    xil_printf("[SMOKE] Barriers done - no flush, SCU should snoop cache\r\n");
 
     /* Step 3+4: DMA transfer via ACP
      * MM2S: DMA reads from SRC via ACP — SCU snoops cache
-     * S2MM: DMA writes to  DST via ACP — SCU updates cache  */
+     * S2MM: DMA writes to  DST via HP0 — SCU updates cache  */
     int status;
+    status = XAxiDma_SimpleTransfer(&dma,
+                                        (UINTPTR)SMOKE_DST_BASE,
+                                        SMOKE_BYTES,
+                                        XAXIDMA_DEVICE_TO_DMA);   /* S2MM */
+    if (status != XST_SUCCESS) {
+            xil_printf("[SMOKE] ERROR: S2MM transfer failed (status=%d)\r\n", status);
+            return -1;
+    }
     status = XAxiDma_SimpleTransfer(&dma,
                                     (UINTPTR)SMOKE_SRC_BASE,
                                     SMOKE_BYTES,
@@ -261,20 +354,18 @@ static int smoke_test_acp(void)
         return -1;
     }
 
-    status = XAxiDma_SimpleTransfer(&dma,
-                                    (UINTPTR)SMOKE_DST_BASE,
-                                    SMOKE_BYTES,
-                                    XAXIDMA_DEVICE_TO_DMA);   /* S2MM */
-    if (status != XST_SUCCESS) {
-        xil_printf("[SMOKE] ERROR: S2MM transfer failed (status=%d)\r\n", status);
-        return -1;
-    }
+
 
     /* Wait for both channels to go idle */
     if (dma_wait_done() != 0)
         return -1;
 
-    /* Step 5: No cache invalidate needed — SCU handled coherency */
+
+
+    /* Step 5: Invalidate DST — DMA wrote result via ACP to DDR.
+         * PS cache still holds the buf_clear() zeros for DST addresses.
+         * Invalidate so the compare reads fresh data from DDR.          */
+    Xil_DCacheInvalidateRange((UINTPTR)SMOKE_DST_BASE, SMOKE_BYTES);
 
     /* Step 6: Verify */
     uint32_t errors = buf_compare(SMOKE_SRC, SMOKE_DST, SMOKE_N * SMOKE_N);
@@ -288,24 +379,31 @@ static int smoke_test_acp(void)
 }
 
 /**
- * @brief HP0 loopback smoke test — non-coherent path, explicit cache management.
+ * @brief HP0 read path smoke test — explicit cache flush discipline.
  *
  * @details
- * Demonstrates correct usage of the HP0 port. Because HP0 bypasses the SCU
- * and goes directly to the DDR controller, the PS must explicitly push dirty
- * cache lines to DDR before the DMA reads, and invalidate its cache after
- * the DMA writes — otherwise the PS would read its own stale copy.
+ * Validates the non-coherent transfer discipline. The PS fills SRC and
+ * explicitly flushes dirty cache lines to DDR before the DMA reads — because
+ * the ACP read path goes to DDR when cache is clean, this effectively tests
+ * the DDR read path.
+ *
+ * Hardware port mapping for this test:
+ *   MM2S reads  SRC via ACP  — cache clean after flush, so reads from DDR
+ *   S2MM writes DST via HP0  — writes directly to DDR, bypasses SCU
  *
  * Transfer sequence:
- *  1. PS fills SRC (data dirty in L1/L2).
- *  2. Xil_DCacheFlushRange(SRC) — writes dirty lines to DDR.
- *  3. DMA MM2S reads SRC via HP0 — reads from DDR directly.
- *  4. DMA S2MM writes DST via HP0 — writes to DDR directly.
- *  5. Xil_DCacheInvalidateRange(DST) — discards stale PS cache copy.
- *  6. PS reads DST — fetches fresh data from DDR.
- *  7. Compare SRC vs DST.
+ *  1. buf_fill(SRC, seed=2.0f)      — data dirty in L1/L2
+ *  2. buf_clear(DST)                — zeros in cache and DDR
+ *  3. FlushRange(SRC)               — push 2.0f to DDR
+ *  4. S2MM armed at DST             — receiver ready
+ *  5. MM2S started at SRC           — reads 2.0f from DDR
+ *  6. dma_wait_done()
+ *  7. InvalidateRange(DST)          — discard cached zeros
+ *  8. buf_compare(SRC, DST)         — SRC from cache (2.0f) vs DST from DDR
  *
- * @return 0 on PASS, -1 on DMA timeout, positive integer = mismatch count.
+ * @return  0 on PASS.
+ * @return -1 on DMA timeout or transfer error.
+ * @return Positive integer = mismatch count.
  */
 static int smoke_test_hp(void)
 {
@@ -317,6 +415,10 @@ static int smoke_test_hp(void)
     buf_clear(SMOKE_DST, SMOKE_N * SMOKE_N);
     xil_printf("[SMOKE] SRC filled, DST cleared\r\n");
 
+    /* Flush DST zeros to DDR — prevents cache writeback from
+     * overwriting DMA result after S2MM writes to DDR via HP0 */
+    Xil_DCacheFlushRange((UINTPTR)SMOKE_DST_BASE, SMOKE_BYTES);
+
     /* Step 2: Flush SRC — HP0 bypasses SCU, so DMA reads from DDR.
      * Without this flush, the DMA would read stale DDR data.          */
     Xil_DCacheFlushRange((UINTPTR)SMOKE_SRC_BASE, SMOKE_BYTES);
@@ -324,14 +426,7 @@ static int smoke_test_hp(void)
 
     /* Step 3+4: DMA transfer via HP0 — straight to DDR controller */
     int status;
-    status = XAxiDma_SimpleTransfer(&dma,
-                                    (UINTPTR)SMOKE_SRC_BASE,
-                                    SMOKE_BYTES,
-                                    XAXIDMA_DMA_TO_DEVICE);   /* MM2S */
-    if (status != XST_SUCCESS) {
-        xil_printf("[SMOKE] ERROR: MM2S transfer failed (status=%d)\r\n", status);
-        return -1;
-    }
+
 
     status = XAxiDma_SimpleTransfer(&dma,
                                     (UINTPTR)SMOKE_DST_BASE,
@@ -339,6 +434,15 @@ static int smoke_test_hp(void)
                                     XAXIDMA_DEVICE_TO_DMA);   /* S2MM */
     if (status != XST_SUCCESS) {
         xil_printf("[SMOKE] ERROR: S2MM transfer failed (status=%d)\r\n", status);
+        return -1;
+    }
+
+    status = XAxiDma_SimpleTransfer(&dma,
+                                        (UINTPTR)SMOKE_SRC_BASE,
+                                        SMOKE_BYTES,
+                                        XAXIDMA_DMA_TO_DEVICE);   /* MM2S */
+    if (status != XST_SUCCESS) {
+        xil_printf("[SMOKE] ERROR: MM2S transfer failed (status=%d)\r\n", status);
         return -1;
     }
 
@@ -363,24 +467,30 @@ static int smoke_test_hp(void)
 }
 
 /**
- * @brief Stale data test — deliberate cache flush omission on HP0 path.
+ * @brief Stale data test — deliberate cache flush omission.
  *
  * @details
- * This test intentionally violates the HP0 cache discipline to confirm that
- * omitting the flush causes silent data corruption. The PS writes new values
- * to SRC but does NOT flush — the DMA reads stale DDR data from the previous
- * test instead of the PS's new values. The comparison is expected to fail.
+ * Intentionally violates the cache discipline to confirm that omitting
+ * the flush causes silent data corruption on the read path.
  *
- * This is an important correctness validation: it proves the board and DMA
- * are behaving as the theory predicts. If this test unexpectedly passes,
- * either the previous test's flush is still in effect, or the cache is not
- * operating in write-back mode as expected.
+ * The PS writes new values to SRC (seed=99.0f) but does NOT flush.
+ * DDR still holds the old values from the previous HP0 test (seed=2.0f).
+ * The DMA reads SRC via ACP — but without the correct ARUSER/ARCACHE
+ * signals driving snooping, or if DDR is simply ahead of cache, the DMA
+ * may read stale DDR values instead of the cached 99.0f.
+ * The comparison between PS cache (99.0f) and DMA result (old value) fails.
  *
- * @note  A FAIL result here is the CORRECT outcome.
+ * A FAIL result here is the CORRECT and expected outcome. If this test
+ * unexpectedly passes, the cache may not be in write-back mode — check
+ * the MMU configuration and linker script cache policy.
  *
- * @return 0 if stale data was confirmed (expected FAIL on compare),
- *        -1 if the DMA itself failed (unexpected),
- *         positive if the compare unexpectedly passed (investigate cache config).
+ * @note S2MM-before-MM2S order is intentionally NOT followed here to
+ *       also validate that the incorrect order causes a stream stall.
+ *       If you want a clean stale-data-only test, add S2MM first.
+ *
+ * @return  0 if stale data confirmed (compare failed as expected — correct).
+ * @return -1 if DMA transfer itself failed unexpectedly.
+ * @return Positive integer if compare unexpectedly passed — investigate.
  */
 static int smoke_test_stale(void)
 {
@@ -443,21 +553,23 @@ static int smoke_test_stale(void)
  * ───────────────────────────────────────────────────────────────────────────*/
 
 /**
- * @brief Run all three DMA smoke tests in sequence.
+ * @brief Run all three DMA smoke tests and print a summary.
  *
  * @details
- * Call this function from main() before running the full benchmark sweep.
- * All three tests must behave as expected before proceeding:
- *  - ACP loopback  : PASS
- *  - HP0 loopback  : PASS
- *  - Stale data    : FAIL (expected — confirms coherency requirement)
+ * Entry point called from main() before the full benchmark sweep.
+ * Initialises the DMA driver once and runs the three tests in sequence.
  *
- * If ACP or HP0 loopback fails, stop and debug before running the benchmark.
- * Common failure causes:
- *  - DMA base address mismatch (check XPAR_AXI_DMA_0_BASEADDR in xparameters.h)
- *  - AXI Protocol Converter not connected in block design
- *  - Buffer addresses not accessible from PL (check AXI address map in Vivado)
- *  - MM2S and S2MM connected to same port (should be ACP and HP0 respectively)
+ * Expected outcomes:
+ *   ACP read path : PASS — SCU snooped cache, data correct without flush
+ *   HP0 read path : PASS — flush + invalidate discipline confirmed
+ *   Stale data    : FAIL — omitting flush causes corruption (expected)
+ *
+ * If ACP or HP0 loopback fails, do not proceed to benchmark. Common causes:
+ *   - DMA base address mismatch (verify XPAR_AXI_DMA_0_BASEADDR)
+ *   - ARUSER/ARCACHE signals not set to 0xF on ACP protocol converter
+ *   - AXI stream loopback missing (M_AXIS_MM2S not connected to S_AXIS_S2MM)
+ *   - S2MM buffer length register too narrow (check Vivado DMA IP settings)
+ *   - Buffer addresses outside PL-accessible DDR range (check address map)
  */
 void run_dma_smoke_tests(void)
 {

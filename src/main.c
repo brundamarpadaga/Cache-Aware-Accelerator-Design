@@ -49,6 +49,7 @@
 #include "xtime_l.h"       /* XTime_GetTime(), COUNTS_PER_SECOND              */
 #include "xparameters.h"   /* Board-specific base addresses from .xsa         */
 #include "pmu.h"           /* ARM Cortex-A9 PMU helpers                       */
+#include "dma_smoke_test.h"
 
 /* ── Memory barriers (inline asm; no external dependency) ────────────────── */
 #define DSB()  __asm__ volatile("dsb" ::: "memory")
