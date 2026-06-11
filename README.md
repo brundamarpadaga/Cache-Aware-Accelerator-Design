@@ -253,6 +253,7 @@ Stale data    : FAIL  — omitting flush causes corruption on HP0 ✓ (expected)
 | DMA SimpleTransfer returning status=15 | AXI DMA buffer length register only 14-bit (max 16383 bytes) | Member A widened to 23-bit in Vivado (max 8MB) |
 | DMA hanging after SimpleTransfer | MM2S started before S2MM armed — stream stalled with no receiver | Start S2MM before MM2S in all transfer sequences |
 | DMA stream hanging with no accelerator | M_AXIS_MM2S and S_AXIS_S2MM unconnected in block design | Member A added loopback wire between stream ports |
+| ACP reading from DDR instead of ARM's cached values | The AXI user signals (ARUSER, AWUSER) were driven as zero, telling the Zynq's Snoop Control Unit to skip cache snooping entirely and go straight to DDR on every ACP transaction | Added Constant IP blocks 
 
 ---
 
