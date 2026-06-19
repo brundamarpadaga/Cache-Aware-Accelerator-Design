@@ -1,9 +1,9 @@
 <?xml version="1.0" encoding="UTF-8"?>
 <projectDescription>
-	<name>benchmark_app</name>
+	<name>benchmark-app</name>
 	<comment>Created by Vitis v2022.2</comment>
 	<projects>
-		<project>zybo-z7</project>
+		<project>zybo-z7-20</project>
 	</projects>
 	<buildSpec>
 		<buildCommand>

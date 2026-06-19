@@ -31,7 +31,7 @@ The benchmark uses matrix multiplication as the workload, sweeping matrix size f
 │                 ↗           ↘                       │
 │           ACP port        HP0 port                  │
 │        (coherent)      (non-coherent)               │
-└───────────────────────────────────────────────────--┘
+└─────────────────────────────────────────────────────┘
               ↑                   ↑
          64-bit AXI          64-bit AXI
               ↑                   ↑
@@ -44,6 +44,26 @@ The benchmark uses matrix multiplication as the workload, sweeping matrix size f
 
 ---
 
+## Block Design
+
+<img width="1435" height="687" alt="image" src="https://github.com/user-attachments/assets/1abb40fe-5017-4604-bbb9-aa40d032fff3" />
+
+
+
+### Port Roles
+
+| Port | Role |
+|------|------|
+| `M_AXI_GP0` | ARM commands the DMA (control plane) |
+| `S_AXI_ACP` | DMA reads with cache coherency via SCU (coherent data plane) |
+| `S_AXI_HP0` | DMA writes directly to DDR, bypassing SCU (non-coherent data plane) |
+| `FCLK_CLK0` | 100MHz fabric clock driving all PL logic |
+| `IRQ_F2P` | DMA signals transfer completion to ARM GIC |
+
+Both ACP and HP0 configured at 64-bit data width for a fair bandwidth comparison — any measured performance difference reflects coherency architecture, not bus width.
+
+---
+
 ## Repository Structure
 
 ```
@@ -53,7 +73,8 @@ project/
 │   ├── constraints.xdc      ← Zybo Z7-20 pin assignments
 │   └── matmul_core.sv       ← PL accelerator (Member A, in development)
 ├── vitis/
-│   ├── main.c               ← benchmark entry point + smoke test
+│   ├── main.c               ← benchmark entry point + counter validation
+│   ├── dma_smoke_test.c/.h  ← ACP and HP0 DMA loopback validation
 │   └── pmu.h                ← ARM PMU (CP15) + PL310 L2 counter interface
 ├── analysis/
 │   └── plot_results.py      ← latency and cache hit rate charts
@@ -61,20 +82,14 @@ project/
 ```
 
 ---
-## Block Design
 
-<img width="1525" height="718" alt="image" src="https://github.com/user-attachments/assets/cb76e06e-88a4-4636-a039-9e09c2df7b6c" />
-
-```
-
----
 ## DDR Memory Map
 
-| Buffer  | Base Address | Size | Purpose          |
-|---------|-------------|------|------------------|
-| MAT_A   | 0x10000000  | 4MB  | Input matrix A   |
-| MAT_B   | 0x10400000  | 4MB  | Input matrix B   |
-| MAT_C   | 0x10800000  | 4MB  | Result matrix C  |
+| Buffer | Base Address | Size | Purpose |
+|--------|-------------|------|---------|
+| MAT_A  | 0x10000000  | 4MB  | Input matrix A / smoke test source |
+| MAT_B  | 0x10400000  | 4MB  | Input matrix B |
+| MAT_C  | 0x10800000  | 4MB  | Result matrix C / smoke test destination |
 
 Buffers start at 256MB into DDR — clear of application code, stack, and heap. Safe for future Linux/U-Boot use on the same board.
 
@@ -95,8 +110,8 @@ Buffers start at 256MB into DDR — clear of application code, stack, and heap. 
 
 | Counter | Register Offset | Event (bits[7:2]) | Measures |
 |---------|----------------|-------------------|----------|
-| CTR0 | 0x208 | 0x3 << 2 = 0x0C | DRREQ — data read requests (total L2 accesses) |
-| CTR1 | 0x204 | 0x2 << 2 = 0x08 | DRHIT — data read hits |
+| CTR0 | 0x208 | `0x3 << 2 = 0x0C` | DRREQ — data read requests (total L2 accesses) |
+| CTR1 | 0x204 | `0x2 << 2 = 0x08` | DRHIT — data read hits |
 
 L2 hit rate = DRHIT / DRREQ × 100%
 
@@ -110,25 +125,45 @@ Global Timer via `XTime_GetTime()` — runs at CPU_CLK/2 = 333MHz (`COUNTS_PER_S
 
 ### ACP (Coherent)
 ```
-mat_fill(A, B)          ← data sits dirty in L1/L2
-DMB barrier
-START DMA → ACP mode    ← SCU snoops cache, PL gets fresh data
+mat_fill(A, B)               ← data sits dirty in L1/L2
+DMB barrier                  ← ensure stores are globally visible
+Flush SRC to DDR             ← ensures DMA engine has clean memory view
+S2MM armed first             ← receiver ready before sender starts
+START DMA → ACP mode         ← SCU snoops cache, PL gets fresh data
 poll DONE
-read result             ← no flush/invalidate needed
+Invalidate DST               ← discard stale PS cache copy of result
+read result
 ```
 
 ### HP0 (Non-Coherent)
 ```
 mat_fill(A, B)
-Xil_DCacheFlushRange(A) ← push dirty lines to DDR so PL sees them
+Xil_DCacheFlushRange(A)      ← push dirty lines to DDR so PL sees them
 Xil_DCacheFlushRange(B)
-START DMA → HP mode     ← PL reads straight from DDR controller
+S2MM armed first
+START DMA → HP mode          ← PL reads straight from DDR controller
 poll DONE
 Xil_DCacheInvalidateRange(C) ← discard stale PS cache copy
 read result
 ```
 
 Flush and invalidate overhead is deliberately included in measured latency — it is a real cost of the non-coherent approach.
+
+---
+
+## DMA Smoke Tests
+
+Three tests run before the full benchmark sweep to validate the hardware paths:
+
+| Test | Expected Result | What It Confirms |
+|------|----------------|------------------|
+| ACP loopback (N=256, 256KB) | PASS | SCU correctly serves dirty cache lines to DMA |
+| HP0 loopback (N=256, 256KB) | PASS | Flush + invalidate discipline works correctly |
+| Stale data (deliberate flush omission) | FAIL | Omitting flush causes silent data corruption on HP0 |
+
+All three tests behaving as expected is required before proceeding to the full benchmark sweep.
+
+> **Note:** S2MM must be armed before MM2S in all transfers. MM2S begins pushing data onto the AXI stream immediately — if S2MM is not already waiting to receive, the stream handshake stalls and the transfer hangs.
 
 ---
 
@@ -150,6 +185,8 @@ Flush and invalidate overhead is deliberately included in measured latency — i
 | Bitstream generated | ✅ Complete |
 | ILA probes on AXI bus | ✅ Complete |
 | .xsa exported with bitstream | ✅ Complete |
+| AXI stream loopback (M_AXIS_MM2S → S_AXIS_S2MM) | ✅ Complete |
+| DMA buffer length register widened to 23-bit (8MB max) | ✅ Complete |
 | Matrix multiply accelerator (matmul_core.sv) | 🔄 In development |
 | ILA waveform captures (AXI burst, response codes) | ⬜ Pending accelerator |
 
@@ -168,9 +205,9 @@ Flush and invalidate overhead is deliberately included in measured latency — i
 | benchmark_coherent() and benchmark_noncoherent() written | ✅ Complete |
 | mat_fill(), align_up(), ticks_to_us() helpers | ✅ Complete |
 | plot_results.py post-processing script | ✅ Complete |
-| DMA smoke test (1KB ACP transfer, verify integrity) | ⬜ Pending |
-| DMA smoke test (1KB HP0 transfer + cache flush) | ⬜ Pending |
-| Deliberate flush omission — confirm stale data | ⬜ Pending |
+| DMA smoke test — ACP loopback (N=256, verify integrity) | ✅ Complete |
+| DMA smoke test — HP0 loopback (N=256, flush + verify) | ✅ Complete |
+| Deliberate flush omission — stale data confirmed | ✅ Complete |
 | Full benchmark sweep 32×32 to 512×512, CSV over UART | ⬜ Pending accelerator |
 | Latency vs matrix size plot | ⬜ Pending data |
 | L2 hit rate chart + crossover identification | ⬜ Pending data |
@@ -179,7 +216,7 @@ Flush and invalidate overhead is deliberately included in measured latency — i
 
 ## Validated Results So Far
 
-PMU and PL310 counters confirmed working on hardware with a 64KB test buffer (16384 floats):
+### PMU and PL310 Counters (64KB test buffer, 16384 floats)
 
 ```
 L1 access delta   : 258,254
@@ -188,10 +225,19 @@ L2 access (DRREQ) :   6,112
 L2 hit    (DRHIT) :   2,048   → second loop pass finds data warm in L2 ✓
 ```
 
-PL310 confirmed accessible:
+### PL310 Accessibility
+
 ```
-PL310 Cache ID : 0x410000C8
-PL310 Ctrl     : 0x00000001  (enabled)
+PL310 Cache ID : 0x410000C8   ✓
+PL310 Ctrl     : 0x00000001   (enabled) ✓
+```
+
+### DMA Smoke Tests (N=256, 262144 bytes)
+
+```
+ACP loopback  : PASS  — SCU correctly served dirty cache lines to DMA ✓
+HP0 loopback  : PASS  — flush + invalidate discipline confirmed ✓
+Stale data    : FAIL  — omitting flush causes corruption on HP0 ✓ (expected)
 ```
 
 ---
@@ -205,6 +251,10 @@ PL310 Ctrl     : 0x00000001  (enabled)
 | PL310 counters stuck at zero despite reset | Event ID written directly to register; field is at bits[7:2] not bits[1:0] | Shift event ID left by 2: `(0x3U << 2)` |
 | `COUNTS_PER_SECOND` printing as 10 | `xil_printf` does not support `%llu` | Cast to `unsigned long`, use `%lu` |
 | Build crash with large static array | 64KB stack array overflows BSP linker script BSS allocation | Use pre-allocated MAT_A buffer at 0x10000000 |
+| DMA SimpleTransfer returning status=15 | AXI DMA buffer length register only 14-bit (max 16383 bytes) | Member A widened to 23-bit in Vivado (max 8MB) |
+| DMA hanging after SimpleTransfer | MM2S started before S2MM armed — stream stalled with no receiver | Start S2MM before MM2S in all transfer sequences |
+| DMA stream hanging with no accelerator | M_AXIS_MM2S and S_AXIS_S2MM unconnected in block design | Member A added loopback wire between stream ports |
+| ACP reading from DDR instead of ARM's cached values | The AXI user signals (ARCACHE, AWCACHE, ARUSER, AWUSER) were driven as zero, telling the Zynq's Snoop Control Unit to skip cache snooping entirely and go straight to DDR on every ACP transaction | Added Constant IP blocks 
 
 ---
 
@@ -215,6 +265,7 @@ PL310 Ctrl     : 0x00000001  (enabled)
 - **Cache line allocation via ACP** — PL writes through ACP pre-warm the ARM L2 cache before the CPU reads the result
 - **Cache flush discipline** — HP transfers require explicit flush before DMA reads and invalidate after DMA writes; omitting either causes silent stale data corruption
 - **PL310 standalone** — on Zynq-7000 the L2 is a separate ARM PL310 controller, not integrated into the Cortex-A9 PMU; must be read via MMIO
+- **S2MM before MM2S** — the AXI stream receiver must be armed before the sender starts; MM2S pushes data immediately and stalls if nothing is consuming the stream
 
 ---
 

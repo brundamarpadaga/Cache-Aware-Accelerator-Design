@@ -1,2 +1,9 @@
 /Debug/
 /Release/
+.cproject
+.project
+.settings/
+_ide/
+*.prj
+Debug/
+Release/

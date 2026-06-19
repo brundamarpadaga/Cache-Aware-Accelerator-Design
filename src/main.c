@@ -49,6 +49,7 @@
 #include "xtime_l.h"       /* XTime_GetTime(), COUNTS_PER_SECOND              */
 #include "xparameters.h"   /* Board-specific base addresses from .xsa         */
 #include "pmu.h"           /* ARM Cortex-A9 PMU helpers                       */
+#include "dma_smoke_test.h"
 
 /* ── Memory barriers (inline asm; no external dependency) ────────────────── */
 #define DSB()  __asm__ volatile("dsb" ::: "memory")
@@ -109,6 +110,8 @@
 #define MAT_A  ((volatile float *)MAT_A_BASE)
 #define MAT_B  ((volatile float *)MAT_B_BASE)
 #define MAT_C  ((volatile float *)MAT_C_BASE)
+
+#define TEST_N 16384
 
 /* ─────────────────────────────────────────────────────────────────────────────
  * BENCHMARK PARAMETERS
@@ -290,9 +293,9 @@ int main(void)
 	l2_read(&l2b);
 
 	/* Do something that definitely causes cache activity */
-	volatile float buf[1024];
-	for (int i = 0; i < 1024; i++) buf[i] = (float)i;
-	for (int i = 0; i < 1024; i++) buf[i] *= 2.0f;
+	//volatile float buf[1024];
+	for (int i = 0; i < TEST_N; i++) MAT_A[i] = (float)i;
+	for (int i = 0; i < TEST_N; i++) MAT_A[i] *= 2.0f;
 
 
 	/* Snapshot after */
@@ -308,6 +311,8 @@ int main(void)
 	xil_printf("L2 hit (DRHIT)    : %lu\r\n",
 	               (unsigned long)(l2a.drhit - l2b.drhit));
 
-	    while(1);
-	    return 0;
+	run_dma_smoke_tests();
+
+	while(1);
+	return 0;
 }
