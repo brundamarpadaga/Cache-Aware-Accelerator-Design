@@ -61,8 +61,12 @@
 
 /* ── DMA driver instance ─────────────────────────────────────────────────── */
 
-/** @brief Global XAxiDma instance — initialised once in dma_init(). */
-static XAxiDma dma;
+/** @brief Global XAxiDma instance — initialised once in dma_init().
+ *  Non-static so benchmark.c can share it via extern declaration in
+ *  dma_smoke_test.h.  Only dma_init() (called from run_dma_smoke_tests)
+ *  must ever call XAxiDma_CfgInitialize on it.*/
+
+XAxiDma dma;
 
 /* ─────────────────────────────────────────────────────────────────────────────
  * INTERNAL HELPERS
@@ -105,7 +109,7 @@ static int dma_init(void)
     XAxiDma_IntrDisable(&dma, XAXIDMA_IRQ_ALL_MASK, XAXIDMA_DMA_TO_DEVICE);
 
     /* ── Debug: print DMA configuration ── */
-        xil_printf("[DMA] Initialised — base addr  : 0x%08lX\r\n",
+        xil_printf("[DMA] Initialised - base addr  : 0x%08lX\r\n",
                    (unsigned long)XPAR_AXI_DMA_0_BASEADDR);
         xil_printf("[DMA] HasSg            : %d\r\n",
                    XAxiDma_HasSg(&dma));
@@ -217,7 +221,7 @@ static uint32_t buf_compare(volatile float *src,
  * @return  0 on success (both channels idle).
  * @return -1 on timeout (DMA did not complete within DMA_TIMEOUT iterations).
  */
-static int dma_wait_done(void)
+int dma_wait_done(void)
 {
     /* S2MM Status Register offset 0x34 — AXI DMA PG021 Table 2-21
      * Bit[1] = Idle: set when S2MM channel has completed and all
@@ -422,7 +426,7 @@ static int smoke_test_hp(void)
     /* Step 2: Flush SRC — HP0 bypasses SCU, so DMA reads from DDR.
      * Without this flush, the DMA would read stale DDR data.          */
     Xil_DCacheFlushRange((UINTPTR)SMOKE_SRC_BASE, SMOKE_BYTES);
-    xil_printf("[SMOKE] Cache flushed — SRC data now in DDR\r\n");
+    xil_printf("[SMOKE] Cache flushed - SRC data now in DDR\r\n");
 
     /* Step 3+4: DMA transfer via HP0 — straight to DDR controller */
     int status;
@@ -453,7 +457,7 @@ static int smoke_test_hp(void)
      * The PS cache may still hold an old copy of DST from buf_clear().
      * Invalidating forces the next read to fetch fresh data from DDR.  */
     Xil_DCacheInvalidateRange((UINTPTR)SMOKE_DST_BASE, SMOKE_BYTES);
-    xil_printf("[SMOKE] Cache invalidated — PS will read fresh DST from DDR\r\n");
+    xil_printf("[SMOKE] Cache invalidated - PS will read fresh DST from DDR\r\n");
 
     /* Step 6+7: Compare */
     uint32_t errors = buf_compare(SMOKE_SRC, SMOKE_DST, SMOKE_N * SMOKE_N);
@@ -467,35 +471,38 @@ static int smoke_test_hp(void)
 }
 
 /**
- * @brief Stale data test — deliberate cache flush omission.
+ * @brief Stale data test — deliberate DST flush omission.
  *
  * @details
- * Intentionally violates the cache discipline to confirm that omitting
- * the flush causes silent data corruption on the read path.
+ * Proves that omitting Xil_DCacheFlushRange(DST) before arming S2MM
+ * allows cache writeback to overwrite the DMA result in DDR, causing
+ * silent data corruption on the write side.
  *
- * The PS writes new values to SRC (seed=99.0f) but does NOT flush.
- * DDR still holds the old values from the previous HP0 test (seed=2.0f).
- * The DMA reads SRC via ACP — but without the correct ARUSER/ARCACHE
- * signals driving snooping, or if DDR is simply ahead of cache, the DMA
- * may read stale DDR values instead of the cached 99.0f.
- * The comparison between PS cache (99.0f) and DMA result (old value) fails.
+ * The PS fills DST with zeros via buf_clear() — those zero lines sit
+ * dirty in L1/L2 cache. The DMA S2MM writes the correct result to DDR
+ * via HP0, bypassing the SCU. The CPU cache then writes its dirty zeros
+ * back to DDR at an unpredictable time, overwriting the DMA result.
+ * When the PS invalidates and reads DST, it fetches the zeros from DDR
+ * rather than the DMA result — corruption confirmed.
  *
- * A FAIL result here is the CORRECT and expected outcome. If this test
- * unexpectedly passes, the cache may not be in write-back mode — check
- * the MMU configuration and linker script cache policy.
+ * This is a write-side coherency failure. Read-side staleness cannot
+ * be demonstrated while MM2S is wired to ACP — the SCU always snoops
+ * the cache regardless of whether SRC was flushed to DDR.
  *
- * @note S2MM-before-MM2S order is intentionally NOT followed here to
- *       also validate that the incorrect order causes a stream stall.
- *       If you want a clean stale-data-only test, add S2MM first.
+ * A FAIL result here is the CORRECT and expected outcome.
+ * If this test unexpectedly passes, the dirty zeros were not written
+ * back to DDR before the invalidate — the cache may not be operating
+ * in write-back mode, or the timing of the writeback varied. Investigate
+ * MMU settings and cache policy in lscript.ld.
  *
- * @return  0 if stale data confirmed (compare failed as expected — correct).
+ * @return  0 if corruption confirmed (compare failed as expected).
  * @return -1 if DMA transfer itself failed unexpectedly.
  * @return Positive integer if compare unexpectedly passed — investigate.
  */
 static int smoke_test_stale(void)
 {
     xil_printf("\r\n[SMOKE] --- Stale data test (deliberate flush omission) ---\r\n");
-    xil_printf("[SMOKE] Expecting FAIL — this confirms HP0 coherency requirement\r\n");
+    xil_printf("[SMOKE] Expecting FAIL - this confirms HP0 coherency requirement\r\n");
 
     /* Fill SRC with NEW values — different seed so they differ from
      * what DDR currently holds from the previous HP0 test.
@@ -509,23 +516,24 @@ static int smoke_test_stale(void)
 
     /* DMA reads stale DDR via HP0 */
     int status;
-    status = XAxiDma_SimpleTransfer(&dma,
-                                    (UINTPTR)SMOKE_SRC_BASE,
-                                    SMOKE_BYTES,
-                                    XAXIDMA_DMA_TO_DEVICE);
-    if (status != XST_SUCCESS) {
-        xil_printf("[SMOKE] ERROR: MM2S transfer failed\r\n");
-        return -1;
-    }
 
     status = XAxiDma_SimpleTransfer(&dma,
                                     (UINTPTR)SMOKE_DST_BASE,
                                     SMOKE_BYTES,
-                                    XAXIDMA_DEVICE_TO_DMA);
+                                    XAXIDMA_DEVICE_TO_DMA); /* S2MM */
     if (status != XST_SUCCESS) {
         xil_printf("[SMOKE] ERROR: S2MM transfer failed\r\n");
         return -1;
     }
+
+    status = XAxiDma_SimpleTransfer(&dma,
+                                        (UINTPTR)SMOKE_SRC_BASE,
+                                        SMOKE_BYTES,
+                                        XAXIDMA_DMA_TO_DEVICE); /* MM2S */
+    if (status != XST_SUCCESS) {
+         xil_printf("[SMOKE] ERROR: MM2S transfer failed\r\n");
+         return -1;
+     }
 
     if (dma_wait_done() != 0)
         return -1;
