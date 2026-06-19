@@ -46,7 +46,8 @@ The benchmark uses matrix multiplication as the workload, sweeping matrix size f
 
 ## Block Design
 
-<img width="1617" height="727" alt="image" src="https://github.com/user-attachments/assets/595d0738-5c45-4932-bde7-8bbb91553853" />
+<img width="1435" height="687" alt="image" src="https://github.com/user-attachments/assets/1abb40fe-5017-4604-bbb9-aa40d032fff3" />
+
 
 
 ### Port Roles
