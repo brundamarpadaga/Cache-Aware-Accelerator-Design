@@ -279,3 +279,7 @@ Stale data    : FAIL  — omitting flush causes corruption on HP0 ✓ (expected)
 | ARM Architecture Reference Manual ARMv7 | DDI0406 | A8.8.108 (MCR), A8.8.110 (MRC) |
 | AXI DMA v7.1 Product Guide | PG021 | Simple DMA mode, register map |
 | Zybo Z7-20 Reference Manual | — | Digilent board documentation |
+
+## Acknowledgments
+
+This project's debugging process, documentation, and code structure were developed with assistance from Claude (Anthropic) — particularly for  diagnosing cache coherency timing issues, PL310 register configuration, and CP15 inline assembly implementation.
