@@ -1,6 +1,7 @@
 /**
  * @file   benchmark.c
  * @author Brunda Marpadaga (brundamarpadaga@gmail.com)
+ * @author Bhavana Marpadaga (marapadagabhavana@gmail.com)
  * @brief  ACP vs HP0 PS@htmlonly↔@endhtmlonly PL coherency benchmark — sweep functions.
  *
  * @details
@@ -37,6 +38,9 @@
  *
  * @note Feed captured UART log to:
  *       @code python3 plot_results.py results.log --out figures/ @endcode
+ *
+ *       Portions of this code, debugging assistance, and documentation
+ *       were developed with help from Claude (Anthropic).
  *
  * @board  Digilent Zybo Z7-20 (XC7Z020-1CLG400C)
  * @tool   Vitis 2022.2, arm-none-eabi-gcc

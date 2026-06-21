@@ -1,6 +1,8 @@
 /**
- * @file dma_smoke_test.c
- * @brief AXI DMA loopback smoke test for ACP and HP0 memory paths.
+ * @file   dma_smoke_test.c
+ * @author Brunda Marpadaga (brundamarpadaga@gmail.com)
+ * @author Bhavana Marpadaga (marapadagabhavana@gmail.com)
+ * @brief  AXI DMA loopback smoke test for ACP and HP0 memory paths.
  *
  * @details
  * Validates the AXI DMA hardware paths on the Zybo Z7-20 before the full
@@ -33,6 +35,8 @@
  *
  * S2MM must be armed before MM2S — MM2S pushes data onto the AXI stream
  * immediately and stalls if S2MM is not already waiting to receive.
+ *
+ * @note Portions of this code were generated with assistance from Claude AI (Anthropic).
  *
  * @board  Digilent Zybo Z7-20 (XC7Z020-1CLG400C)
  * @tool   Vitis 2022.2, arm-none-eabi-gcc

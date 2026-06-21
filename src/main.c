@@ -1,7 +1,10 @@
 /**
- * main.c — ACP vs HP PS↔PL Coherency Benchmark
- * Member B: PS Software Engineer
+ * @file   main.c
+ * @author Brunda Marpadaga (brundamarpadaga@gmail.com)
+ * @author Bhavana Marpadaga (marapadagabhavana@gmail.com)
+ * @brief  ACP vs HP PS↔PL Coherency Benchmark — entry point.
  *
+ * @details
  * Build target: Vitis bare-metal (Cortex-A9, Zynq-7000)
  * Toolchain:    arm-none-eabi-gcc
  *
@@ -12,6 +15,11 @@
  *   dma_smoke_test.h  — shared addresses, extern dma, extern dma_wait_done
  *   benchmark.c       — benchmark_coherent, benchmark_noncoherent, sweep loop
  *   benchmark.h       — run_benchmark_sweep declaration
+ *
+ * @note Portions of this code were generated with assistance from Claude AI (Anthropic).
+ *
+ * @board  Digilent Zybo Z7-20 (XC7Z020-1CLG400C)
+ * @tool   Vitis 2022.2, arm-none-eabi-gcc
  */
 
 #include <stdint.h>

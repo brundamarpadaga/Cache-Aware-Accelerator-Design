@@ -1,3 +1,12 @@
+/**
+ * @file   pmu.h
+ * @author Brunda Marpadaga (brundamarpadaga@gmail.com)
+ * @author Bhavana Marpadaga (marapadagabhavana@gmail.com)
+ * @brief  ARM PMU CP15 and PL310 L2 cache counter helpers for Zynq-7000.
+ *
+ * @note Portions of this code were generated with assistance from Claude AI (Anthropic).
+ */
+
 #ifndef PMU_H
 #define PMU_H
 

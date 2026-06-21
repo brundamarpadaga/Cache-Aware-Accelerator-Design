@@ -1,3 +1,12 @@
+/**
+ * @file   dma_smoke_test.h
+ * @author Brunda Marpadaga (brundamarpadaga@gmail.com)
+ * @author Bhavana Marpadaga (marapadagabhavana@gmail.com)
+ * @brief  Shared declarations for the AXI DMA loopback smoke tests.
+ *
+ * @note Portions of this code were generated with assistance from Claude AI (Anthropic).
+ */
+
 #ifndef DMA_SMOKE_TEST_H
 #define DMA_SMOKE_TEST_H
 
