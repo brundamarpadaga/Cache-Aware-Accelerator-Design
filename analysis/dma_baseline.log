@@ -1,0 +1,111 @@
+Hello from Zybo Z7-20
+PMU and PL310 L2 counters initialised
+PL310 Cache ID   : 0x410000C8
+PL310 Ctrl (en?) : 0x00000001
+L1 access delta   : 307936
+L1 miss delta     : 2057
+L2 access (DRREQ) : 6115
+L2 hit (DRHIT)    : 2053
+
+================================================
+  DMA Smoke Test - ACP vs HP0 Path Validation  
+================================================
+[DMA] Initialised - base addr  : 0x40400000
+[DMA] HasSg            : 0
+[DMA] MM2S MaxTransfer : 8388607 bytes
+[DMA] S2MM MaxTransfer : 8388607 bytes
+[DMA] SMOKE_BYTES      : 262144 bytes
+
+[SMOKE] --- ACP loopback test (N=256, 262144 bytes) ---
+[SMOKE] SRC filled, DST cleared
+[VERIFY] SRC[0] from DDR   = 0x40000000
+[VERIFY] SRC[0] from cache = 0x3F800000
+[VERIFY] If DDR != 1.0f but test passes → SCU snooping confirmed
+[VERIFY] If DDR == 1.0f → eviction occurred, result inconclusive
+[SMOKE] Barriers done - no flush, SCU should snoop cache
+[SMOKE] ACP loopback (N=256): PASS
+
+[SMOKE] --- HP0 loopback test (N=256, 262144 bytes) ---
+[SMOKE] SRC filled, DST cleared
+[SMOKE] Cache flushed - SRC data now in DDR
+[SMOKE] Cache invalidated - PS will read fresh DST from DDR
+[SMOKE] HP0 loopback (N=256): PASS
+
+[SMOKE] --- Stale data test (deliberate flush omission) ---
+[SMOKE] Expecting FAIL - this confirms HP0 coherency requirement
+[SMOKE] SRC filled with new values (NOT flushed to DDR)
+[SMOKE] DDR still holds stale data from previous test
+[CMP] First mismatch at [4392]: src bits=0x42CEC8B4  dst bits=0x00000000
+[SMOKE] HP0 stale data test: FAIL as expected (240 mismatches)
+[SMOKE] CONFIRMED: omitting flush causes data corruption on HP0
+
+================================================
+  Smoke Test Summary
+================================================
+  ACP loopback  : PASS
+  HP0 loopback  : PASS
+  Stale data    : FAIL as expected (CORRECT)
+
+  All tests behaved as expected.
+  Safe to proceed to full benchmark sweep.
+================================================
+
+
+Starting benchmark sweep...
+
+# =====================================================
+# ACP vs HP0 Benchmark Sweep — Zybo Z7-20
+# COUNTS_PER_SEC=333333343  REPEATS=5
+# mode,N,elapsed_us,l1d_miss,l1d_access,l2d_miss,l2d_access,l1_hit_pct,l2_hit_pct
+# =====================================================
+ACP,32,32,6,821,39,75,99.26,48.00
+ACP,32,32,3,799,10,20,99.62,50.00
+ACP,32,32,2,790,7,14,99.74,50.00
+ACP,32,32,2,811,5,10,99.75,50.00
+ACP,32,31,0,799,2,4,100.00,50.00
+HP,32,57,0,811,208,335,100.00,37.91
+HP,32,57,0,805,213,340,100.00,37.35
+HP,32,57,0,806,212,339,100.00,37.46
+HP,32,57,0,802,214,341,100.00,37.24
+HP,32,57,0,804,210,337,100.00,37.68
+ACP,64,111,0,2852,512,1024,100.00,50.00
+ACP,64,111,0,2852,512,1024,100.00,50.00
+ACP,64,111,0,2852,514,1026,100.00,49.90
+ACP,64,111,0,2851,512,1024,100.00,50.00
+ACP,64,111,0,2853,511,1023,100.00,50.04
+HP,64,211,0,2796,835,1343,100.00,37.82
+HP,64,211,0,2795,831,1339,100.00,37.93
+HP,64,211,0,2794,832,1340,100.00,37.91
+HP,64,211,0,2795,832,1340,100.00,37.91
+HP,64,211,0,2793,836,1344,100.00,37.79
+ACP,128,428,0,11034,2050,4098,100.00,49.97
+ACP,128,428,0,11035,2046,4094,100.00,50.02
+ACP,128,428,0,11037,2047,4095,100.00,50.01
+ACP,128,428,0,11032,2048,4096,100.00,50.00
+ACP,128,428,0,11035,2046,4094,100.00,50.02
+HP,128,827,0,10737,3321,5353,100.00,37.96
+HP,128,827,0,10734,3323,5355,100.00,37.94
+HP,128,827,0,10738,3316,5348,100.00,37.99
+HP,128,827,0,10736,3323,5355,100.00,37.94
+HP,128,827,0,10735,3324,5356,100.00,37.93
+ACP,256,1697,0,43737,7965,15798,100.00,49.58
+ACP,256,1697,0,43733,7880,15715,100.00,49.85
+ACP,256,1697,0,43734,7844,15680,100.00,49.97
+ACP,256,1697,0,43737,7840,15677,100.00,49.99
+ACP,256,1697,0,43730,7833,15670,100.00,50.01
+HP,256,3281,0,43789,13299,21427,100.00,37.93
+HP,256,3283,0,42532,13265,21393,100.00,37.99
+HP,256,3283,0,42533,13288,21416,100.00,37.95
+HP,256,3283,0,43782,13297,21425,100.00,37.93
+HP,256,3283,0,43781,13285,21413,100.00,37.95
+ACP,512,6772,0,174782,44420,77041,100.00,42.34
+ACP,512,6772,0,174792,45374,77989,100.00,41.82
+ACP,512,6772,0,174810,47514,80103,100.00,40.68
+ACP,512,6772,0,174818,49111,81684,100.00,39.87
+ACP,512,6772,0,174828,49256,81826,100.00,39.80
+HP,512,10655,0,174851,53118,85630,100.00,37.96
+HP,512,10655,0,174875,53240,85752,100.00,37.91
+HP,512,10655,0,169753,53130,85642,100.00,37.96
+HP,512,10655,0,169748,53093,85605,100.00,37.97
+HP,512,10655,0,169741,53066,85578,100.00,37.99
+# Sweep complete.

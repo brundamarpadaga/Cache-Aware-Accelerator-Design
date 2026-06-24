@@ -63,16 +63,21 @@
 /* ─────────────────────────────────────────────────────────────────────────────
  * DDR MEMORY MAP  (must match dma_smoke_test.h and main.c)
  *
- * SMOKE_SRC_BASE (0x10000000) = MAT_A  — DMA source, 4 MB slot
- * SMOKE_DST_BASE (0x10800000) = MAT_C  — DMA destination, 4 MB slot
- * MAT_B occupies the 4 MB slot between them at 0x10400000 (unused in
- * loopback mode; reserved for future accelerator matmul workload).
+ * SRC_BASE (0x10000000) = matrix A  — DMA MM2S source, 4 MB slot
+ * MAT_B_BASE (0x10400000) = matrix B — SW matmul operand, 4 MB slot
+ * DST_BASE (0x10800000) = matrix C  — DMA S2MM destination, 4 MB slot
+ *
+ * In DMA-loopback mode B is unused; in SW_MATMUL mode all three are used.
+ * When the HLS accelerator is added, DMA will stream A and B to the fabric
+ * and receive C back via the same AXI stream.
  * ───────────────────────────────────────────────────────────────────────────*/
-#define MAT_A_BASE   SMOKE_SRC_BASE          /* 0x10000000 — input / source  */
-#define MAT_C_BASE   SMOKE_DST_BASE          /* 0x10800000 — result / dest   */
+#define SRC_BASE     SMOKE_SRC_BASE          /* 0x10000000 — matrix A / DMA source */
+#define MAT_B_BASE   0x10400000UL            /* 0x10400000 — matrix B (SW matmul)  */
+#define DST_BASE     SMOKE_DST_BASE          /* 0x10800000 — matrix C / DMA dest   */
 
-#define MAT_A  ((volatile float *)MAT_A_BASE)
-#define MAT_C  ((volatile float *)MAT_C_BASE)
+#define SRC    ((volatile float *)SRC_BASE)
+#define MAT_B  ((volatile float *)MAT_B_BASE)
+#define DST    ((volatile float *)DST_BASE)
 
 /* ─────────────────────────────────────────────────────────────────────────────
  * BENCHMARK PARAMETERS
@@ -165,11 +170,11 @@ static void print_csv_row(const char     *mode,
 /**
  * benchmark_coherent() — ACP read path, no SRC cache management.
  *
- * SRC (MAT_A) is left dirty in L1/L2 after mat_fill — it is NOT flushed.
- * The DMA reads MAT_A via ACP; the SCU snoops PS cache and serves the
+ * SRC (SRC) is left dirty in L1/L2 after mat_fill — it is NOT flushed.
+ * The DMA reads SRC via ACP; the SCU snoops PS cache and serves the
  * dirty lines directly, so DDR is never consulted for source data.
  *
- * DST (MAT_C) zeros are flushed before the transfer to prevent a
+ * DST (DST) zeros are flushed before the transfer to prevent a
  * speculative PS cache writeback overwriting the HP0 result in DDR
  * after S2MM has already committed it.
  *
@@ -192,10 +197,10 @@ static uint64_t benchmark_coherent(uint32_t N,
      * Fill SRC dirty into cache — deliberately no flush.
      * Clear DST then flush its zeros to DDR so the HP0 write landing
      * in DDR cannot be overwritten by a later speculative writeback.     */
-    mat_fill(MAT_A, N, 1.0f);
+    mat_fill(SRC, N, 1.0f);
 
-    for (uint32_t i = 0U; i < N * N; ++i) MAT_C[i] = 0.0f;
-    Xil_DCacheFlushRange((UINTPTR)MAT_C_BASE, bytes);
+    for (uint32_t i = 0U; i < N * N; ++i) DST[i] = 0.0f;
+    Xil_DCacheFlushRange((UINTPTR)DST_BASE, bytes);
 
     DMB();   /* all preceding stores globally visible before timed region */
 
@@ -209,7 +214,7 @@ static uint64_t benchmark_coherent(uint32_t N,
     /* S2MM first — arm the receiver before MM2S pushes onto AXI stream.
      * If MM2S starts first the stream stalls and MM2S hangs indefinitely. */
     int rc = XAxiDma_SimpleTransfer(&dma,
-                                    (UINTPTR)MAT_C_BASE,
+                                    (UINTPTR)DST_BASE,
                                     bytes,
                                     XAXIDMA_DEVICE_TO_DMA);  /* S2MM */
     if (rc != XST_SUCCESS) {
@@ -218,9 +223,9 @@ static uint64_t benchmark_coherent(uint32_t N,
         return UINT64_MAX;
     }
 
-    /* MM2S: DMA reads MAT_A via ACP — SCU snoops, serves dirty cache lines */
+    /* MM2S: DMA reads SRC via ACP — SCU snoops, serves dirty cache lines */
     rc = XAxiDma_SimpleTransfer(&dma,
-                                (UINTPTR)MAT_A_BASE,
+                                (UINTPTR)SRC_BASE,
                                 bytes,
                                 XAXIDMA_DMA_TO_DEVICE);      /* MM2S */
     if (rc != XST_SUCCESS) {
@@ -236,7 +241,7 @@ static uint64_t benchmark_coherent(uint32_t N,
     }
 
     /* Invalidate DST — HP0 wrote to DDR, PS cache holds stale zeros */
-    Xil_DCacheInvalidateRange((UINTPTR)MAT_C_BASE, bytes);
+    Xil_DCacheInvalidateRange((UINTPTR)DST_BASE, bytes);
 
     XTime_GetTime(&t1);
     pmu_read_all(pe);
@@ -249,7 +254,7 @@ static uint64_t benchmark_coherent(uint32_t N,
 /**
  * benchmark_noncoherent() — HP path, explicit flush + invalidate.
  *
- * SRC (MAT_A) is filled dirty then explicitly flushed to DDR.  Because the
+ * SRC (SRC) is filled dirty then explicitly flushed to DDR.  Because the
  * ACP read port goes to DDR when cache lines are clean, this makes the DMA
  * read functionally equivalent to an HP0 read.  This matches the real-world
  * non-coherent discipline users must follow on the HP path.
@@ -272,8 +277,8 @@ static uint64_t benchmark_noncoherent(uint32_t N,
      * Fill SRC dirty — the flush is what we want to measure, so the
      * fill itself sits outside the timed window.
      * Clear DST here too; its flush happens inside the timed window.    */
-    mat_fill(MAT_A, N, 2.0f);
-    for (uint32_t i = 0U; i < N * N; ++i) MAT_C[i] = 0.0f;
+    mat_fill(SRC, N, 2.0f);
+    for (uint32_t i = 0U; i < N * N; ++i) DST[i] = 0.0f;
 
     DMB();
 
@@ -286,14 +291,14 @@ static uint64_t benchmark_noncoherent(uint32_t N,
 
     /* 1. Flush SRC — push dirty lines to DDR so the DMA reads correct data.
      *    Omitting this is the canonical non-coherent bug (see smoke_test_stale). */
-    Xil_DCacheFlushRange((UINTPTR)MAT_A_BASE, bytes);
+    Xil_DCacheFlushRange((UINTPTR)SRC_BASE, bytes);
 
     /* 2. Flush DST zeros — same writeback-race prevention as ACP path.  */
-    Xil_DCacheFlushRange((UINTPTR)MAT_C_BASE, bytes);
+    Xil_DCacheFlushRange((UINTPTR)DST_BASE, bytes);
 
     /* 3. S2MM first */
     int rc = XAxiDma_SimpleTransfer(&dma,
-                                    (UINTPTR)MAT_C_BASE,
+                                    (UINTPTR)DST_BASE,
                                     bytes,
                                     XAXIDMA_DEVICE_TO_DMA);  /* S2MM */
     if (rc != XST_SUCCESS) {
@@ -304,7 +309,7 @@ static uint64_t benchmark_noncoherent(uint32_t N,
 
     /* 4. MM2S: cache clean → ACP read falls through to DDR */
     rc = XAxiDma_SimpleTransfer(&dma,
-                                (UINTPTR)MAT_A_BASE,
+                                (UINTPTR)SRC_BASE,
                                 bytes,
                                 XAXIDMA_DMA_TO_DEVICE);      /* MM2S */
     if (rc != XST_SUCCESS) {
@@ -320,7 +325,80 @@ static uint64_t benchmark_noncoherent(uint32_t N,
     }
 
     /* 6. Invalidate DST */
-    Xil_DCacheInvalidateRange((UINTPTR)MAT_C_BASE, bytes);
+    Xil_DCacheInvalidateRange((UINTPTR)DST_BASE, bytes);
+
+    XTime_GetTime(&t1);
+    pmu_read_all(pe);
+    l2_read(le);
+    /* ── End timed region ─────────────────────────────────────────────── */
+
+    return ticks_to_us(t1 - t0);
+}
+
+/**
+ * benchmark_sw_matmul() — pure-software N×N matrix multiply on the ARM CPU.
+ *
+ * This is the Phase-1 software baseline: the CPU computes C = A × B entirely
+ * in software with no HLS accelerator involved.  DMA is NOT used here; the
+ * comparison point is against benchmark_coherent / benchmark_noncoherent which
+ * measure DMA data-movement cost without any compute.
+ *
+ * When the HLS accelerator is added (Phase 2), DMA will stream A and B to the
+ * fabric and receive C back.  This function provides the reference latency that
+ * the accelerator must beat.
+ *
+ * Memory layout:
+ *   SRC (0x10000000)   = matrix A  (N×N floats)
+ *   MAT_B (0x10400000) = matrix B  (N×N floats)
+ *   DST (0x10800000)   = matrix C  (N×N floats, result)
+ *
+ * Cache discipline: A and B are flushed to DDR before timing starts so the
+ * timed interval captures realistic DDR→cache cold-load cost, not just L1
+ * hits from the fill.  DST is zeroed and flushed before the timed multiply.
+ *
+ * Inner loop uses the cache-friendly k-loop reordering (i-k-j) to improve
+ * L1 hit rate on the B row access pattern.
+ *
+ * Returns elapsed microseconds, or UINT64_MAX on overflow.
+ */
+static uint64_t benchmark_sw_matmul(uint32_t N,
+                                     pmu_counts_t *ps, pmu_counts_t *pe,
+                                     l2_counts_t  *ls, l2_counts_t  *le)
+{
+    uint32_t bytes = align_up(N * N * (uint32_t)sizeof(float));
+    XTime t0, t1;
+
+    /* ── Untimed setup ────────────────────────────────────────────────────
+     * Fill A and B with deterministic patterns, flush both to DDR so the
+     * timed region starts with a cold cache (realistic DDR access cost).
+     * Zero DST and flush it so no stale writeback can corrupt the result. */
+    mat_fill(SRC,   N, 1.0f);
+    mat_fill(MAT_B, N, 2.0f);
+    Xil_DCacheFlushRange((UINTPTR)SRC_BASE,   bytes);
+    Xil_DCacheFlushRange((UINTPTR)MAT_B_BASE, bytes);
+
+    for (uint32_t i = 0U; i < N * N; ++i) DST[i] = 0.0f;
+    Xil_DCacheFlushRange((UINTPTR)DST_BASE, bytes);
+
+    DMB();
+
+    /* ── Timed region ─────────────────────────────────────────────────── */
+    pmu_reset_counters();
+    l2_reset();
+    pmu_read_all(ps);
+    l2_read(ls);
+    XTime_GetTime(&t0);
+
+    /* C = A × B  (i-k-j order — cache-friendly B row reuse) */
+    for (uint32_t i = 0U; i < N; ++i) {
+        for (uint32_t k = 0U; k < N; ++k) {
+            float a_ik = SRC[i * N + k];
+            for (uint32_t j = 0U; j < N; ++j)
+                DST[i * N + j] += a_ik * MAT_B[k * N + j];
+        }
+    }
+
+    DSB();   /* ensure all stores to DST are globally visible */
 
     XTime_GetTime(&t1);
     pmu_read_all(pe);
@@ -340,9 +418,16 @@ static uint64_t benchmark_noncoherent(uint32_t N,
  * Call this from main() after run_dma_smoke_tests() has passed — the smoke
  * tests initialise `dma` and confirm hardware is wired correctly.
  *
- * Ordering: all REPEATS ACP runs at N, then all REPEATS HP runs at N,
- * before moving to the next size.  This keeps cache state symmetric and
- * comparable between modes at each size.
+ * Modes run per size:
+ *   ACP  — DMA loopback via coherent ACP port (no cache flush on SRC)
+ *   HP   — DMA loopback via non-coherent HP0 port (explicit flush + invalidate)
+ *   SW   — Software N×N matrix multiply on ARM CPU (Phase-1 baseline)
+ *
+ * Ordering: all REPEATS of each mode at N before moving to the next size.
+ * This keeps cache state symmetric and comparable between modes at each size.
+ *
+ * Capture UART output and feed to:
+ *   python3 analysis/plot_results.py results.log --out analysis/figures/
  */
 void run_benchmark_sweep(void)
 {
@@ -351,7 +436,7 @@ void run_benchmark_sweep(void)
 
     xil_printf("\r\n");
     xil_printf("# =====================================================\r\n");
-    xil_printf("# ACP vs HP0 Benchmark Sweep — Zybo Z7-20\r\n");
+    xil_printf("# ACP vs HP0 vs SW-Matmul Benchmark — Zybo Z7-20\r\n");
     xil_printf("# COUNTS_PER_SEC=%lu  REPEATS=%lu\r\n",
                (unsigned long)COUNTS_PER_SECOND, (unsigned long)REPEATS);
     xil_printf("# mode,N,elapsed_us,l1d_miss,l1d_access,"
@@ -377,6 +462,15 @@ void run_benchmark_sweep(void)
                            (unsigned long)N, (unsigned long)rep);
             else
                 print_csv_row("HP", N, us, &ps, &pe, &ls, &le);
+        }
+
+        for (uint32_t rep = 0U; rep < REPEATS; ++rep) {
+            uint64_t us = benchmark_sw_matmul(N, &ps, &pe, &ls, &le);
+            if (us == UINT64_MAX)
+                xil_printf("# SKIP SW  N=%lu rep=%lu\r\n",
+                           (unsigned long)N, (unsigned long)rep);
+            else
+                print_csv_row("SW", N, us, &ps, &pe, &ls, &le);
         }
     }
 

@@ -7,3 +7,7 @@ _ide/
 *.prj
 Debug/
 Release/
+
+# Analysis — track scripts and logs, ignore generated figures
+analysis/figures/*.png
+analysis/figures/*.pdf
