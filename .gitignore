@@ -8,6 +8,4 @@ _ide/
 Debug/
 Release/
 
-# Analysis — track scripts and logs, ignore generated figures
-analysis/figures/*.png
-analysis/figures/*.pdf
+# Analysis — track scripts, logs, and figures
