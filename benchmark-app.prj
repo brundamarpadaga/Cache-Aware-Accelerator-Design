@@ -1,6 +1,6 @@
 <?xml version="1.0" encoding="ASCII"?>
-<sdkproject:SdkProject xmi:version="2.0" xmlns:xmi="http://www.omg.org/XMI" xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance" xmlns:sdkproject="http://www.xilinx.com/sdkproject" name="benchmark-app" location="C:/Users/marpa/workspace/zybo/benchmark-app" platform="C:/Users/marpa/workspace/zybo/zybo-z7-20/export/zybo-z7-20/zybo-z7-20.xpfm" platformUID="xilinx:zybo-z7-20::0.0(custom)" systemProject="benchmark-app_system" sysConfig="zybo-z7-20" runtime="C/C++" cpu="standalone_domain" cpuInstance="ps7_cortexa9_0" os="standalone" mssSignature="3a8ecee2aeee0c805f925098a5bc820d">
-  <configuration name="Debug" id="xilinx.gnu.armv7.exe.debug.681224803" dirty="true">
+<sdkproject:SdkProject xmi:version="2.0" xmlns:xmi="http://www.omg.org/XMI" xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance" xmlns:sdkproject="http://www.xilinx.com/sdkproject" name="benchmark-app" location="C:/Users/marpa/workspace/zybo/benchmark-app" platform="C:/Users/marpa/workspace/zybo/zybo-z7-20/export/zybo-z7-20/zybo-z7-20.xpfm" platformUID="xilinx:zybo-z7-20::0.0(custom)" systemProject="benchmark-app_system" sysConfig="zybo-z7-20" runtime="C/C++" cpu="standalone_domain" cpuInstance="ps7_cortexa9_0" os="standalone" mssSignature="b922f1d4e8310d8ae0ef26d10d22eb25">
+  <configuration name="Debug" id="xilinx.gnu.armv7.exe.debug.681224803">
     <configBuildOptions xsi:type="sdkproject:SdkOptions"/>
     <lastBuildOptions xsi:type="sdkproject:SdkOptions"/>
   </configuration>

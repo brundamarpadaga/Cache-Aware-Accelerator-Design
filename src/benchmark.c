@@ -55,6 +55,33 @@
 #include "pmu.h"
 #include "dma_smoke_test.h"   /* extern dma, dma_wait_done(), DDR addresses */
 #include "benchmark.h"
+#ifdef XPAR_MATMUL_0_DEVICE_ID
+#include "xmatmul.h"
+extern XMatmul matmul_hw;    /* defined and initialised in main.c */
+#endif
+
+/* ── Matmul mode selection ───────────────────────────────────────────────────
+ * Choose which matmul benchmark runs in the sweep.  Set via Vitis project
+ * build settings: C/C++ Build → Settings → Compiler → Preprocessor Symbols
+ *
+ *   MATMUL_MODE=MATMUL_SW   (default) — ARM software multiply
+ *   MATMUL_MODE=MATMUL_HW            — Vitis HLS accelerator (requires new XSA)
+ *
+ * Only one mode runs per sweep to keep total runtime manageable.
+ * ─────────────────────────────────────────────────────────────────────────── */
+#define MATMUL_SW  1
+#define MATMUL_HW  2
+#ifndef MATMUL_MODE
+#define MATMUL_MODE  MATMUL_SW
+#endif
+
+/* If HW mode is requested but the platform hasn't been rebuilt yet,
+ * fall back to SW silently so the project still compiles. */
+#if MATMUL_MODE == MATMUL_HW && !defined(XPAR_MATMUL_0_DEVICE_ID)
+#warning "MATMUL_MODE=MATMUL_HW set but xmatmul.h not found — falling back to SW until XSA is updated"
+#undef  MATMUL_MODE
+#define MATMUL_MODE  MATMUL_SW
+#endif
 
 /* ── Memory barriers ─────────────────────────────────────────────────────── */
 #define DSB()  __asm__ volatile("dsb" ::: "memory")
@@ -409,6 +436,75 @@ static uint64_t benchmark_sw_matmul(uint32_t N,
 }
 
 /* ─────────────────────────────────────────────────────────────────────────────
+ * HLS ACCELERATOR BENCHMARK  (compiled only after platform rebuild with new XSA)
+ * ───────────────────────────────────────────────────────────────────────────*/
+#ifdef XPAR_MATMUL_0_DEVICE_ID
+/**
+ * benchmark_matmul() — Vitis HLS matmul_0 accelerator via AXI-Lite control.
+ *
+ * The accelerator (matmul_0) is a memory-mapped master; it does NOT connect to
+ * the AXI DMA stream ports.  It accesses DDR independently:
+ *   - Reads A and B via m_axi_ACP → axi_intercon_acp → S_AXI_ACP (coherent)
+ *   - Writes C via m_axi_HP0 → axi_intercon_hp0 → S_AXI_HP0 (non-coherent)
+ *
+ * Cache protocol:
+ *   A and B: flushed to DDR before start (ACP snoops, but flush ensures
+ *            DDR consistency if lines were evicted between fill and start).
+ *   C: invalidated after ap_done (HP0 wrote to DDR; PS cache holds stale zeros).
+ *
+ * Timed interval: XMatmul_Start() → ap_done poll clears → invalidate DST.
+ *
+ * Returns elapsed microseconds, or UINT64_MAX on error.
+ */
+static uint64_t benchmark_matmul(uint32_t N,
+                                  pmu_counts_t *ps, pmu_counts_t *pe,
+                                  l2_counts_t  *ls, l2_counts_t  *le)
+{
+    uint32_t bytes = align_up(N * N * (uint32_t)sizeof(float));
+    XTime t0, t1;
+
+    /* ── Untimed setup ────────────────────────────────────────────────────
+     * Fill A and B, flush both to DDR so the accelerator reads coherent data.
+     * Zero DST and flush its zeros to prevent a speculative PS writeback
+     * corrupting the HP0 result after the accelerator has committed it.     */
+    mat_fill(SRC,   N, 1.0f);
+    mat_fill(MAT_B, N, 2.0f);
+    Xil_DCacheFlushRange((UINTPTR)SRC_BASE,   bytes);
+    Xil_DCacheFlushRange((UINTPTR)MAT_B_BASE, bytes);
+
+    for (uint32_t i = 0U; i < N * N; ++i) DST[i] = 0.0f;
+    Xil_DCacheFlushRange((UINTPTR)DST_BASE, bytes);
+
+    DMB();
+
+    /* ── Timed region ─────────────────────────────────────────────────── */
+    pmu_reset_counters();
+    l2_reset();
+    pmu_read_all(ps);
+    l2_read(ls);
+    XTime_GetTime(&t0);
+
+    XMatmul_Set_A(&matmul_hw, SRC_BASE);
+    XMatmul_Set_B(&matmul_hw, MAT_B_BASE);
+    XMatmul_Set_C(&matmul_hw, DST_BASE);
+    XMatmul_Set_N(&matmul_hw, N);
+    XMatmul_Start(&matmul_hw);
+
+    while (!XMatmul_IsDone(&matmul_hw));   /* poll ap_done */
+
+    /* Invalidate DST — HP0 wrote to DDR, PS cache holds stale zeros */
+    Xil_DCacheInvalidateRange((UINTPTR)DST_BASE, bytes);
+
+    XTime_GetTime(&t1);
+    pmu_read_all(pe);
+    l2_read(le);
+    /* ── End timed region ─────────────────────────────────────────────── */
+
+    return ticks_to_us(t1 - t0);
+}
+#endif /* XPAR_MATMUL_0_DEVICE_ID */
+
+/* ─────────────────────────────────────────────────────────────────────────────
  * PUBLIC ENTRY POINT
  * ───────────────────────────────────────────────────────────────────────────*/
 
@@ -419,9 +515,10 @@ static uint64_t benchmark_sw_matmul(uint32_t N,
  * tests initialise `dma` and confirm hardware is wired correctly.
  *
  * Modes run per size:
- *   ACP  — DMA loopback via coherent ACP port (no cache flush on SRC)
- *   HP   — DMA loopback via non-coherent HP0 port (explicit flush + invalidate)
- *   SW   — Software N×N matrix multiply on ARM CPU (Phase-1 baseline)
+ *   ACP    — DMA loopback via coherent ACP port (no cache flush on SRC)
+ *   HP     — DMA loopback via non-coherent HP0 port (explicit flush + invalidate)
+ *   SW     — Software N×N matrix multiply on ARM CPU (Phase-1 baseline)
+ *   MATMUL — Vitis HLS accelerator matmul_0 (Phase-2, when XSA is updated)
  *
  * Ordering: all REPEATS of each mode at N before moving to the next size.
  * This keeps cache state symmetric and comparable between modes at each size.
@@ -436,7 +533,11 @@ void run_benchmark_sweep(void)
 
     xil_printf("\r\n");
     xil_printf("# =====================================================\r\n");
+#if MATMUL_MODE == MATMUL_HW
+    xil_printf("# ACP vs HP0 vs HW-Matmul Benchmark — Zybo Z7-20\r\n");
+#else
     xil_printf("# ACP vs HP0 vs SW-Matmul Benchmark — Zybo Z7-20\r\n");
+#endif
     xil_printf("# COUNTS_PER_SEC=%lu  REPEATS=%lu\r\n",
                (unsigned long)COUNTS_PER_SECOND, (unsigned long)REPEATS);
     xil_printf("# mode,N,elapsed_us,l1d_miss,l1d_access,"
@@ -464,6 +565,7 @@ void run_benchmark_sweep(void)
                 print_csv_row("HP", N, us, &ps, &pe, &ls, &le);
         }
 
+#if MATMUL_MODE == MATMUL_SW
         for (uint32_t rep = 0U; rep < REPEATS; ++rep) {
             uint64_t us = benchmark_sw_matmul(N, &ps, &pe, &ls, &le);
             if (us == UINT64_MAX)
@@ -472,6 +574,16 @@ void run_benchmark_sweep(void)
             else
                 print_csv_row("SW", N, us, &ps, &pe, &ls, &le);
         }
+#elif MATMUL_MODE == MATMUL_HW
+        for (uint32_t rep = 0U; rep < REPEATS; ++rep) {
+            uint64_t us = benchmark_matmul(N, &ps, &pe, &ls, &le);
+            if (us == UINT64_MAX)
+                xil_printf("# SKIP MATMUL N=%lu rep=%lu\r\n",
+                           (unsigned long)N, (unsigned long)rep);
+            else
+                print_csv_row("MATMUL", N, us, &ps, &pe, &ls, &le);
+        }
+#endif
     }
 
     xil_printf("# Sweep complete.\r\n");

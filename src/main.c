@@ -13,7 +13,7 @@
  *   pmu.h             — ARM PMU CP15 + PL310 L2 MMIO counter helpers
  *   dma_smoke_test.c  — XAxiDma instance, dma_init, dma_wait_done, smoke tests
  *   dma_smoke_test.h  — shared addresses, extern dma, extern dma_wait_done
- *   benchmark.c       — benchmark_coherent, benchmark_noncoherent, sweep loop
+ *   benchmark.c       — benchmark_coherent, benchmark_noncoherent, benchmark_matmul, sweep loop
  *   benchmark.h       — run_benchmark_sweep declaration
  *
  * @note Portions of this code were generated with assistance from Claude AI (Anthropic).
@@ -24,9 +24,24 @@
 
 #include <stdint.h>
 #include "xil_printf.h"
+#include "xil_cache.h"
 #include "pmu.h"
 #include "dma_smoke_test.h"
 #include "benchmark.h"
+#ifdef XPAR_MATMUL_0_DEVICE_ID
+#include "xmatmul.h"
+
+/* Shared with benchmark.c — defined once here. */
+XMatmul matmul_hw;
+
+/* MAT_A/B/C base addresses — must match benchmark.c memory map. */
+#define MAT_A_BASE  0x10000000UL
+#define MAT_B_BASE  0x10400000UL
+#define MAT_C_BASE  0x10800000UL
+#define MAT_A  ((volatile float *)MAT_A_BASE)
+#define MAT_B  ((volatile float *)MAT_B_BASE)
+#define MAT_C  ((volatile float *)MAT_C_BASE)
+#endif
 
 int main(void)
 {
@@ -71,6 +86,61 @@ int main(void)
 
     /* ── Smoke tests — initialises `dma`, confirms HW wiring ─────────── */
     run_dma_smoke_tests();
+
+#ifdef XPAR_MATMUL_0_DEVICE_ID
+    /* ── HLS accelerator init ────────────────────────────────────────── */
+    xil_printf("\r\nInitialising matmul_0 accelerator...\r\n");
+    XMatmul_Config *matmul_cfg = XMatmul_LookupConfig(XPAR_MATMUL_0_DEVICE_ID);
+    if (!matmul_cfg) {
+        xil_printf("ERROR: XMatmul_LookupConfig returned NULL — "
+                   "rebuild platform from new .xsa\r\n");
+        while (1) { /* halt */ }
+    }
+    XMatmul_CfgInitialize(&matmul_hw, matmul_cfg);
+    xil_printf("matmul_0 base addr : 0x%08lX\r\n",
+               (unsigned long)XPAR_MATMUL_0_S_AXI_CONTROL_BASEADDR);
+
+    /* ── Correctness check: 4×4 identity × known pattern (result must = B) */
+    xil_printf("Running matmul correctness check (N=4)...\r\n");
+    for (int i = 0; i < 4; i++)
+        for (int j = 0; j < 4; j++)
+            MAT_A[i * 4 + j] = (i == j) ? 1.0f : 0.0f;   /* identity */
+    for (int i = 0; i < 4; i++)
+        for (int j = 0; j < 4; j++)
+            MAT_B[i * 4 + j] = (float)(i * 4 + j + 1);   /* known pattern */
+
+    Xil_DCacheFlushRange((UINTPTR)MAT_A_BASE, 4 * 4 * sizeof(float));
+    Xil_DCacheFlushRange((UINTPTR)MAT_B_BASE, 4 * 4 * sizeof(float));
+    for (int i = 0; i < 4 * 4; i++) MAT_C[i] = 0.0f;
+    Xil_DCacheFlushRange((UINTPTR)MAT_C_BASE, 4 * 4 * sizeof(float));
+
+    XMatmul_Set_A(&matmul_hw, MAT_A_BASE);
+    XMatmul_Set_B(&matmul_hw, MAT_B_BASE);
+    XMatmul_Set_C(&matmul_hw, MAT_C_BASE);
+    XMatmul_Set_N(&matmul_hw, 4);
+    XMatmul_Start(&matmul_hw);
+    while (!XMatmul_IsDone(&matmul_hw));
+
+    Xil_DCacheInvalidateRange((UINTPTR)MAT_C_BASE, 4 * 4 * sizeof(float));
+
+    int errors = 0;
+    for (int i = 0; i < 4 * 4; i++) {
+        if (MAT_C[i] != MAT_B[i]) {
+            xil_printf("  MISMATCH [%d]: got 0x%08lX expected 0x%08lX\r\n",
+                       i,
+                       (unsigned long)*(uint32_t *)&MAT_C[i],
+                       (unsigned long)*(uint32_t *)&MAT_B[i]);
+            errors++;
+        }
+    }
+    if (errors == 0) {
+        xil_printf("MATMUL PASS\r\n");
+    } else {
+        xil_printf("MATMUL FAIL (%d errors) — do not trust benchmark results\r\n",
+                   errors);
+        while (1) { /* halt */ }
+    }
+#endif /* XPAR_MATMUL_0_DEVICE_ID */
 
     /* ── Benchmark sweep — do not call before smoke tests pass ───────── */
     xil_printf("\r\nStarting benchmark sweep...\r\n");

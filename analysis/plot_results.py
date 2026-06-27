@@ -1,18 +1,17 @@
 #!/usr/bin/env python3
 """
-plot_results.py — ACP vs HP0 vs SW-Matmul Benchmark Result Plotter
-====================================================================
+plot_results.py — ACP vs HP0 vs SW-Matmul vs HW-Matmul Benchmark Result Plotter
+================================================================================
 Board:   Digilent Zybo Z7-20 (XC7Z020-1CLG400C)
-Project: ACP (coherent) vs HP0 (non-coherent) vs SW (software matmul baseline)
+Project: ACP / HP0 / SW matmul / HW matmul (Vitis HLS accelerator)
 
 Usage
 -----
   # Single UART log file:
   python3 plot_results.py results.log --out figures/
 
-  # Multiple log files (combined on the same plots — useful for comparing
-  # a DMA-only run captured before adding SW_MATMUL against a new run):
-  python3 plot_results.py dma_baseline.log sw_matmul.log --out figures/
+  # Multiple log files (merged onto the same plots):
+  python3 plot_results.py dma_baseline.log results_with_sw.log --out figures/
 
   # Pipe directly from a serial terminal:
   python3 plot_results.py -          # reads stdin
@@ -20,12 +19,14 @@ Usage
 Expected CSV input format (lines starting with '#' are ignored as comments):
   mode,N,elapsed_us,l1d_miss,l1d_access,l2d_miss,l2d_access,l1_hit_pct,l2_hit_pct
 
-  mode        : "ACP", "HP", or "SW"
+  mode        : "ACP", "HP", "SW", or "MATMUL"
   N           : matrix side length (32, 64, 128, 256, 512)
   elapsed_us  : wall-clock time in microseconds
-                  ACP — no cache management overhead
-                  HP  — includes SRC flush + DST invalidate
-                  SW  — full software N×N matmul (A×B→C, cold-cache start)
+                  ACP    — DMA loopback via ACP, no cache management overhead
+                  HP     — DMA loopback via HP0, includes SRC flush + DST invalidate
+                  SW     — full software N×N matmul on ARM CPU (A×B→C, cold-cache)
+                  MATMUL — Vitis HLS accelerator matmul_0; times ap_start → ap_done
+                           including DST cache invalidate; A+B flushed before start
   l1d_miss    : L1 D-cache miss count (ARM PMU CTR0, event 0x03)
   l1d_access  : L1 D-cache access count (ARM PMU CTR1, event 0x04)
   l2d_miss    : L2 miss count derived from PL310 (drreq - drhit)
@@ -63,9 +64,9 @@ except ImportError:
 # Constants
 # ---------------------------------------------------------------------------
 EXPECTED_SIZES  = [32, 64, 128, 256, 512]
-MODES           = ["ACP", "HP", "SW"]
-COLORS          = {"ACP": "#1f77b4", "HP": "#d62728", "SW": "#2ca02c"}   # blue, red, green
-MARKERS         = {"ACP": "o",       "HP": "s",       "SW": "^"}
+MODES           = ["ACP", "HP", "SW", "MATMUL"]
+COLORS          = {"ACP": "#1f77b4", "HP": "#d62728", "SW": "#2ca02c", "MATMUL": "#9467bd"}
+MARKERS         = {"ACP": "o",       "HP": "s",       "SW": "^",       "MATMUL": "D"}
 
 FIELDNAMES = [
     "mode", "N", "elapsed_us",
@@ -105,7 +106,7 @@ def parse_log(source) -> list[dict]:
     for row in reader:
         lineno += 1
         mode = row.get("mode", "").strip().upper()
-        if mode not in ("ACP", "HP", "SW"):
+        if mode not in ("ACP", "HP", "SW", "MATMUL"):
             skipped += 1
             continue
         try:
@@ -269,7 +270,7 @@ def plot_latency(agg: dict, out_path: str | None) -> None:
         _errorbars(ax, agg[mode]["elapsed_us"], mode)
 
     ax.set_ylabel("Elapsed time (µs)")
-    ax.set_title("ACP vs HP0 vs SW-Matmul — Latency\n(median ± min/max over 5 repeats)")
+    ax.set_title("ACP vs HP0 vs SW-Matmul vs HW-Matmul — Latency\n(median ± min/max over 5 repeats)")
     _style_xaxis(ax)
 
     # Annotate which cost is included per mode
@@ -284,9 +285,14 @@ def plot_latency(agg: dict, out_path: str | None) -> None:
         va="top", fontsize=7.5, color=COLORS["ACP"],
     )
     ax.annotate(
-        "SW: software N×N matmul on ARM CPU (cold-cache, no DMA)",
+        "SW: software N×N matmul on ARM CPU (cold-cache)",
         xy=(0.02, 0.85), xycoords="axes fraction",
         va="top", fontsize=7.5, color=COLORS["SW"],
+    )
+    ax.annotate(
+        "MATMUL: Vitis HLS accelerator — ap_start to ap_done + DST invalidate",
+        xy=(0.02, 0.79), xycoords="axes fraction",
+        va="top", fontsize=7.5, color=COLORS["MATMUL"],
     )
 
     fig.tight_layout()
@@ -307,7 +313,7 @@ def plot_l1_hit(agg: dict, out_path: str | None) -> None:
 
     ax.set_ylabel("L1 D-cache hit rate (%)")
     ax.set_ylim(0, 105)
-    ax.set_title("ACP vs HP0 vs SW — L1 D-Cache Hit Rate\n(ARM PMU events 0x03 / 0x04)")
+    ax.set_title("ACP vs HP0 vs SW vs MATMUL — L1 D-Cache Hit Rate\n(ARM PMU events 0x03 / 0x04)")
     _style_xaxis(ax)
 
     fig.tight_layout()
@@ -328,7 +334,7 @@ def plot_l2_hit(agg: dict, out_path: str | None) -> None:
 
     ax.set_ylabel("L2 hit rate (%)  [PL310 DRHIT / DRREQ]")
     ax.set_ylim(0, 105)
-    ax.set_title("ACP vs HP0 vs SW — PL310 L2 Cache Hit Rate\n(MMIO counters at 0xF8F02000)")
+    ax.set_title("ACP vs HP0 vs SW vs MATMUL — PL310 L2 Cache Hit Rate\n(MMIO counters at 0xF8F02000)")
     _style_xaxis(ax)
 
     fig.tight_layout()
@@ -372,8 +378,19 @@ def plot_speedup(agg: dict, out_path: str | None) -> None:
                             where=[r > 1 for r in ratios],
                             alpha=0.12, color=COLORS["SW"])
 
+    if "MATMUL" in agg:
+        matmul_us = {t[0]: t[1] for t in agg["MATMUL"].get("elapsed_us", [])}
+        common = sorted(set(acp_us) & set(matmul_us))
+        if common:
+            ratios = [matmul_us[N] / acp_us[N] for N in common]
+            ax.plot(common, ratios, marker="D", color=COLORS["MATMUL"],
+                    linewidth=2, markersize=7, label="HW matmul / ACP")
+            ax.fill_between(common, 1.0, ratios,
+                            where=[r > 1 for r in ratios],
+                            alpha=0.12, color=COLORS["MATMUL"])
+
     ax.set_ylabel("Mode elapsed / ACP elapsed  (> 1 = ACP faster)")
-    ax.set_title("Relative Cost vs ACP DMA Baseline\n(HP & SW matmul normalised to ACP time)")
+    ax.set_title("Relative Cost vs ACP DMA Baseline\n(HP, SW, MATMUL normalised to ACP time)")
     _style_xaxis(ax)
     ax.legend(framealpha=0.9)
 
@@ -394,7 +411,7 @@ def plot_l1_misses(agg: dict, out_path: str | None) -> None:
         _errorbars(ax, agg[mode]["l1d_miss"], mode)
 
     ax.set_ylabel("L1 D-cache misses (count)")
-    ax.set_title("ACP vs HP0 vs SW — L1 D-Cache Miss Count\n(ARM PMU event 0x03)")
+    ax.set_title("ACP vs HP0 vs SW vs MATMUL — L1 D-Cache Miss Count\n(ARM PMU event 0x03)")
     _style_xaxis(ax)
 
     fig.tight_layout()
@@ -450,6 +467,7 @@ def main() -> None:
         print("  Make sure the UART log contains lines like:")
         print("    ACP,64,1234,5678,90123,456,789,94.50,82.30")
         print("    SW,64,98765,12345,67890,234,567,81.20,54.30")
+        print("    MATMUL,64,456,789,12345,67,890,95.10,88.40")
         sys.exit(1)
 
     agg = aggregate(rows)
