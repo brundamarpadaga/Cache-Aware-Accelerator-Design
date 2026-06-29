@@ -46,7 +46,9 @@ The benchmark uses matrix multiplication as the workload, sweeping matrix size f
 
 ## Block Design
 
-<img width="1435" height="687" alt="image" src="https://github.com/user-attachments/assets/1abb40fe-5017-4604-bbb9-aa40d032fff3" />
+
+<img width="1866" height="830" alt="image" src="https://github.com/user-attachments/assets/8ff5c5ed-b9ac-430f-b26c-80f0721b432f" />
+
 
 
 
