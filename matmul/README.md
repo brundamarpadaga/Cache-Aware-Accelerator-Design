@@ -121,50 +121,150 @@ exactly the bottleneck the next several iterations had to work through.
 
 ---
 
-## 3a. Kernel Iteration History
+## 3b. Pragma Experiments on the Accumulation Loop
 
-### v1 — Naive, `a_local` only
+With `a_local` in place (v1), the next problem was the inner
+accumulation loop (`sum += a_local[k] * B[k*N+j]`) — getting it to
+pipeline at II=1 took several attempts, each fighting a different
+flavor of loop-carried dependency on `sum`.
 
-```cpp
-a_local[k] = A[i*N+k];               // row of A cached in BRAM
-sum += a_local[k] * B[k*N+j];        // B read directly from DDR
-```
-
-II=5, Fmax=136MHz in HLS. On hardware this was the first integrated
-version (`figures3`): **10× slower than software matmul** at N=512
-(~1s vs 97ms). Root cause: `B[k*N+j]` is column-strided in memory —
-DDR addresses jump by N×4 bytes every read — so AXI cannot burst these
-transfers. N³ individual non-burst reads dominate the runtime.
-
-### v2 — Accumulator array (modulo / counter indexing)
-
-Tried `float acc[5]` with a runtime index to break a loop-carried
-dependency on `sum`. Any runtime-indexed array write synthesizes as a
-mux in series with the floating-point adder:
-
-```
-critical path: acc_idx load → mux (1.95ns) → fadd (7.26ns) = 9.2ns > 7.3ns budget
-```
-
-Result: II capped at 4, Fmax dropped to ~108MHz. Did not fix the
-underlying strided-B problem either — abandoned.
-
-### v3 — Pipeline the `j` loop, let `k` auto-unroll
+### Attempt 1 — Plain `#pragma HLS PIPELINE`
 
 ```cpp
-for (int j = 0; j < N; j++) {
-    #pragma HLS PIPELINE II=1
-    float sum = 0.0f;
-    for (int k = 0; k < N; k++)
-        sum += a_local[k] * B[k*N+j];
-    C[i*N+j] = sum;
+for (int k = 0; k < N; k++) {
+    #pragma HLS PIPELINE
+    sum += a_local[k] * B[k * N + j];
 }
 ```
 
-Each `j` iteration gets an independent `sum` — no shared state, no mux.
-**II=1, Fmax=136MHz.** Best non-tiled result, but B is still strided in
-DRAM since this version doesn't address memory layout, only the HLS
-scheduling problem.
+The simplest thing to try first — pipeline the accumulation loop
+directly with no other hints.
+
+### Attempt 2 — `PIPELINE II=1` + `DEPENDENCE` override
+
+```cpp
+for (int k = 0; k < N; k++) {
+    #pragma HLS PIPELINE II=1
+    #pragma HLS DEPENDENCE variable=sum type=intra false
+    sum += a_local[k] * B[k * N + j];
+}
+```
+
+Tried telling HLS to ignore the intra-loop dependency on `sum` via
+`DEPENDENCE`. This pragma is meant for *false* dependencies the tool
+over-conservatively assumes — but the dependency on `sum` here is real
+(each iteration genuinely needs the previous iteration's accumulated
+value), so overriding it doesn't change the scheduling problem.
+`DEPENDENCE` also cannot be applied to a scalar variable, so this
+pragma had no effect at all.
+
+### Attempt 3 — `PIPELINE II=1` + `UNROLL factor=5`
+
+```cpp
+for (int k = 0; k < N; k++) {
+    #pragma HLS PIPELINE II=1
+    #pragma HLS UNROLL factor=5
+    sum += a_local[k] * B[k * N + j];
+}
+```
+
+Partially unrolling by 5 to give the adder more independent work per
+cycle. This produced warnings and left `sum` as a single shared
+accumulator across the 5 unrolled copies, so the dependency chain was
+made 5-wide instead of removed. Result: **II=25** — since each
+floating-point add takes 5 cycles, the 5-wide chain serializes to
+5×5=25.
+
+### Attempt 4 — Manual 5-element accumulator array, modulo indexing
+
+```cpp
+for (int j = 0; j < N; j++) {
+    float acc[5] = {0.0f, 0.0f, 0.0f, 0.0f, 0.0f};
+    #pragma HLS ARRAY_PARTITION variable=acc complete
+
+    for (int k = 0; k < N; k++) {
+        #pragma HLS PIPELINE II=1
+        acc[k % 5] += a_local[k] * B[k * N + j];
+    }
+
+    C[i * N + j] = acc[0] + acc[1] + acc[2] + acc[3] + acc[4];
+}
+```
+
+The idea: spread the accumulation across 5 independent registers
+(`acc[0..4]`) using `k % 5` to round-robin between them, breaking the
+single-accumulator chain, then sum the 5 partial results at the end —
+effectively a manual version of what `UNROLL` was trying to do
+automatically. The modulo only added complexity without helping:
+**II=4**, since `acc[k % 5]` still uses a runtime index and HLS
+synthesizes a mux to route the write.
+
+### Attempt 5 — Same idea, explicit counter instead of `%`
+
+```cpp
+for (int j = 0; j < N; j++) {
+    float acc[5] = {0.0f, 0.0f, 0.0f, 0.0f, 0.0f};
+    #pragma HLS ARRAY_PARTITION variable=acc complete dim=1
+
+    int acc_idx = 0;
+
+    for (int k = 0; k < N; k++) {
+        #pragma HLS PIPELINE II=1
+        acc[acc_idx] += a_local[k] * B[k * N + j];
+        acc_idx = (acc_idx == 4) ? 0 : acc_idx + 1;
+    }
+
+    C[i * N + j] = acc[0] + acc[1] + acc[2] + acc[3] + acc[4];
+}
+```
+
+Swapped `%` for an explicit increment-and-wrap counter, in case the
+modulo operation itself was blocking compile-time index resolution.
+Same outcome as Attempt 4: still **did not reach II=1**, because
+`acc_idx` is a runtime value regardless of how it's computed — HLS
+cannot determine at compile time which `acc[]` element a given
+iteration writes to, so it still synthesizes a mux to route the write.
+That mux sits in series with the floating-point adder on the critical
+path, which is what capped the achievable II.
+
+### The real fix — pipeline the `j` loop, not the `k` loop
+
+```cpp
+for (int i = 0; i < N; i++) {
+
+    for (int k = 0; k < N; k++) {
+        #pragma HLS PIPELINE II=1
+        a_local[k] = A[i * N + k];
+    }
+
+    for (int j = 0; j < N; j++) {
+        #pragma HLS PIPELINE II=1
+        float sum = 0.0f;
+
+        for (int k = 0; k < N; k++) {
+            sum += a_local[k] * B[k * N + j];
+        }
+
+        C[i * N + j] = sum;
+    }
+}
+```
+
+Instead of trying to break the dependency *within* one `j` iteration's
+accumulation, this sidesteps the problem entirely: `PIPELINE` moves to
+the `j` loop, and `k` is left to auto-unroll underneath it. Each `j`
+iteration now gets its own independent `sum` — no register is shared
+*across* `j` iterations, so there's nothing left for HLS to multiplex.
+**This achieved II=1, Fmax=136MHz** — the best non-tiled result, and
+the version that was exported and integrated into hardware first
+(`figures3`). On the board it ran **10× slower than software matmul**
+at N=512 (~1s vs 97ms): II=1 fixed the HLS scheduling problem, but
+`B[k*N+j]` is still column-strided in DDR — addresses jump by N×4
+bytes every read, so AXI cannot burst these transfers, and N³
+individual non-burst reads dominate the runtime regardless of how
+cleanly the loop pipelines on-chip. This became the baseline (v3) the
+tiling work in Section 4 built on, this time fixing the memory-layout
+problem at its source via tiling and a hardware transpose of B.
 
 ---
 
@@ -273,12 +373,12 @@ A few non-obvious things learned while wiring this into the block design:
 ✓ Tiled + transposed kernel written and synthesized — II=1 on every
   loop, Fmax≈137MHz, all loop constraints satisfied
 ✗ TILE=16 bitstream fails DSP placement (1312 needed vs 220 available)
-□ Pending: resynthesize with TILE=4, confirm DSP count fits in HLS
+✓ TILE=4: resynthesized with TILE=4, confirm DSP count fits in HLS
   synthesis report before regenerating the bitstream
 □ Pending: run C Simulation in Vitis HLS against a software reference
   (identity-matrix test) to verify kernel correctness before re-export —
   not yet done, recommended before burning another bitstream cycle
-□ Pending: re-export IP → refresh Vivado IP catalog → reconnect
+✓: re-export IP → refresh Vivado IP catalog → reconnect
   matmul_0 → regenerate bitstream
 □ Pending: hardware correctness check (4×4 identity matrix) on the
   actual board before running the full sweep
