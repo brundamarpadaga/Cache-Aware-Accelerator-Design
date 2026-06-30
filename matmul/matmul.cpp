@@ -65,8 +65,8 @@ void matmul_tiled(float *A, float *B_T, float *C, int N) {
      * tj: column tile index (0, 16, 32, ... 496) — 32 iterations
      * Total output tiles: 32 × 32 = 1024 tiles
      */
-    for (int ti = 0; ti < MAX_N; ti += TILE) {
-        for (int tj = 0; tj < MAX_N; tj += TILE) {
+    for (int ti = 0; ti < N; ti += TILE) {
+        for (int tj = 0; tj < N; tj += TILE) {
 
             /* Step 1 — Zero the output tile
              * c_tile accumulates partial sums across all tk iterations.
@@ -90,7 +90,7 @@ void matmul_tiled(float *A, float *B_T, float *C, int N) {
              * The same a_tile and b_tile are each reused TILE=16 times
              * across the i and j loops inside — zero extra DDR reads.
              */
-            for (int tk = 0; tk < MAX_N; tk += TILE) {
+            for (int tk = 0; tk < N; tk += TILE) {
 
                 /* Step 2 — Load 16×16 tile of A from DDR into BRAM
                  *
@@ -140,7 +140,7 @@ void matmul_tiled(float *A, float *B_T, float *C, int N) {
                         float sum = 0.0f;
                         for (int k = 0; k < TILE; k++) {
                             #pragma HLS UNROLL
-                            sum += a_tile[i][k] * b_tile[k][j];
+                            sum += a_tile[i][k] * b_tile[j][k];
                         }
                         c_tile[i][j] += sum;
                     }
