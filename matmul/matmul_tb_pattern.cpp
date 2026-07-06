@@ -6,10 +6,13 @@
 // Declaration matching your top-level function in matmul.cpp
 void matmul(float *A, float *B, float *B_T, float *C, int N);
 
+#define MAX_N 512   // must match matmul.cpp's MAX_N
+
 int main() {
     const int N = 32;   // multiple of TILE=4, exercises multi-tile accumulation
 
-    static float A[N*N], B[N*N], B_T[N*N], C[N*N], C_ref[N*N];
+    static float A[MAX_N*MAX_N], B[MAX_N*MAX_N], B_T[MAX_N*MAX_N],
+                     C[MAX_N*MAX_N], C_ref[MAX_N*MAX_N];
 
     // A = patterned, NOT identity — every row/column distinct
     // A[i][j] = (i + 2*j + 1) % 5 + 1    values in [1,5], no symmetry
