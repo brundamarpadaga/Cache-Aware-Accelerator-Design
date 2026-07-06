@@ -1,0 +1,73 @@
+wC�kV��W���WVR��fs��FRORgVgV�R���^�k��C�K[kc�[�w�cfc��Z��^�k�����vg��Zr���wR�wk��s�c�_�scw�s��S��brcOG����j���gROGn�wnSwnSwnSwn�wnSwnSwnSwn�wn�wnSwnSwnswn�wnSwnSw�KgHello from Zybo Z7-20
+PMU and PL310 L2 counters initialised
+PL310 Cache ID   : 0x410000C8
+PL310 Ctrl (en?) : 0x00000001
+L1 access delta   : 307559
+L1 miss delta     : 2052
+L2 access (DRREQ) : 6107
+L2 hit (DRHIT)    : 2047
+
+================================================
+  DMA Smoke Test - ACP vs HP0 Path Validation  
+================================================
+[DMA] Initialised - base addr  : 0x40400000
+[DMA] HasSg            : 0
+[DMA] MM2S MaxTransfer : 8388607 bytes
+[DMA] S2MM MaxTransfer : 8388607 bytes
+[DMA] SMOKE_BYTES      : 262144 bytes
+
+[SMOKE] --- ACP loopback test (N=256, 262144 bytes) ---
+[SMOKE] SRC filled, DST cleared
+[VERIFY] SRC[0] from DDR   = 0x3F800000
+[VERIFY] SRC[0] from cache = 0x3F800000
+[VERIFY] If DDR != 1.0f but test passes → SCU snooping confirmed
+[VERIFY] If DDR == 1.0f → eviction occurred, result inconclusive
+[SMOKE] Barriers done - no flush, SCU should snoop cache
+[SMOKE] ACP loopback (N=256): PASS
+
+[SMOKE] --- HP0 loopback test (N=256, 262144 bytes) ---
+[SMOKE] SRC filled, DST cleared
+[SMOKE] Cache flushed - SRC data now in DDR
+[SMOKE] Cache invalidated - PS will read fresh DST from DDR
+[SMOKE] HP0 loopback (N=256): PASS
+
+[SMOKE] --- Stale data test (deliberate flush omission) ---
+[SMOKE] Expecting FAIL - this confirms HP0 coherency requirement
+[SMOKE] SRC filled with new values (NOT flushed to DDR)
+[SMOKE] DDR still holds stale data from previous test
+[CMP] First mismatch at [1976]: src bits=0x42C9F3B6  dst bits=0x00000000
+[SMOKE] HP0 stale data test: FAIL as expected (176 mismatches)
+[SMOKE] CONFIRMED: omitting flush causes data corruption on HP0
+
+================================================
+  Smoke Test Summary
+================================================
+  ACP loopback  : PASS
+  HP0 loopback  : PASS
+  Stale data    : FAIL as expected (CORRECT)
+
+  All tests behaved as expected.
+  Safe to proceed to full benchmark sweep.
+================================================
+
+
+Initialising matmul_0 accelerator...
+matmul_0 base addr : 0x40000000
+Running matmul correctness check (N=4)...
+  MISMATCH [0]: got 0x68335719 expected 0x3F800000
+  MISMATCH [1]: got 0x7CFBAFA2 expected 0x40000000
+  MISMATCH [2]: got 0x7FC00000 expected 0x40400000
+  MISMATCH [3]: got 0x7FC00000 expected 0x40800000
+  MISMATCH [4]: got 0xE7D1B8A8 expected 0x40A00000
+  MISMATCH [5]: got 0x7CFB9618 expected 0x40C00000
+  MISMATCH [6]: got 0x7FC00000 expected 0x40E00000
+  MISMATCH [7]: got 0x7FC00000 expected 0x41000000
+  MISMATCH [8]: got 0xE847B19B expected 0x41100000
+  MISMATCH [9]: got 0x7635CB13 expected 0x41200000
+  MISMATCH [10]: got 0x7FC00000 expected 0x41300000
+  MISMATCH [11]: got 0x7FC00000 expected 0x41400000
+  MISMATCH [12]: got 0xE8481C7B expected 0x41500000
+  MISMATCH [13]: got 0x7635C393 expected 0x41600000
+  MISMATCH [14]: got 0x7FC00000 expected 0x41700000
+  MISMATCH [15]: got 0x7FC00000 expected 0x41800000
+MATMUL FAIL (16 errors) — do not trust benchmark results

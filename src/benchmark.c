@@ -90,21 +90,23 @@ extern XMatmul matmul_hw;    /* defined and initialised in main.c */
 /* ─────────────────────────────────────────────────────────────────────────────
  * DDR MEMORY MAP  (must match dma_smoke_test.h and main.c)
  *
- * SRC_BASE (0x10000000) = matrix A  — DMA MM2S source, 4 MB slot
- * MAT_B_BASE (0x10400000) = matrix B — SW matmul operand, 4 MB slot
- * DST_BASE (0x10800000) = matrix C  — DMA S2MM destination, 4 MB slot
- *
- * In DMA-loopback mode B is unused; in SW_MATMUL mode all three are used.
- * When the HLS accelerator is added, DMA will stream A and B to the fabric
- * and receive C back via the same AXI stream.
+ * SRC_BASE     (0x10000000) = matrix A       — DMA source / HLS A input,  4 MB
+ * MAT_B_BASE   (0x10400000) = matrix B       — HLS B input,               4 MB
+ * DST_BASE     (0x10800000) = matrix C       — HLS result / DMA dest,     4 MB
+ * MAT_B_T_BASE (0x10C00000) = B transposed   — HLS internal scratch (NEW), 4 MB
+ *   The HLS kernel transposes B into this region internally before tiling,
+ *   so B access becomes row-major (burst-friendly) instead of column-strided.
+ *   No software transpose needed — do NOT write to this region from the PS.
  * ───────────────────────────────────────────────────────────────────────────*/
-#define SRC_BASE     SMOKE_SRC_BASE          /* 0x10000000 — matrix A / DMA source */
-#define MAT_B_BASE   0x10400000UL            /* 0x10400000 — matrix B (SW matmul)  */
-#define DST_BASE     SMOKE_DST_BASE          /* 0x10800000 — matrix C / DMA dest   */
+#define SRC_BASE      SMOKE_SRC_BASE         /* 0x10000000 — matrix A / DMA source */
+#define MAT_B_BASE    0x10400000UL           /* 0x10400000 — matrix B              */
+#define DST_BASE      SMOKE_DST_BASE         /* 0x10800000 — matrix C / DMA dest   */
+#define MAT_B_T_BASE  0x10C00000UL           /* 0x10C00000 — B transposed scratch  */
 
-#define SRC    ((volatile float *)SRC_BASE)
-#define MAT_B  ((volatile float *)MAT_B_BASE)
-#define DST    ((volatile float *)DST_BASE)
+#define SRC      ((volatile float *)SRC_BASE)
+#define MAT_B    ((volatile float *)MAT_B_BASE)
+#define DST      ((volatile float *)DST_BASE)
+#define MAT_B_T  ((volatile float *)MAT_B_T_BASE)
 
 /* ─────────────────────────────────────────────────────────────────────────────
  * BENCHMARK PARAMETERS
@@ -466,14 +468,17 @@ static uint64_t benchmark_matmul(uint32_t N,
     /* ── Untimed setup ────────────────────────────────────────────────────
      * Fill A and B, flush both to DDR so the accelerator reads coherent data.
      * Zero DST and flush its zeros to prevent a speculative PS writeback
-     * corrupting the HP0 result after the accelerator has committed it.     */
+     * corrupting the HP0 result after the accelerator has committed it.
+     * Invalidate B_T scratch — HW writes via HP0 then reads via ACP;
+     * without this the SCU may serve stale PS cache lines at that address. */
     mat_fill(SRC,   N, 1.0f);
     mat_fill(MAT_B, N, 2.0f);
     Xil_DCacheFlushRange((UINTPTR)SRC_BASE,   bytes);
     Xil_DCacheFlushRange((UINTPTR)MAT_B_BASE, bytes);
 
     for (uint32_t i = 0U; i < N * N; ++i) DST[i] = 0.0f;
-    Xil_DCacheFlushRange((UINTPTR)DST_BASE, bytes);
+    Xil_DCacheFlushRange((UINTPTR)DST_BASE,    bytes);
+    Xil_DCacheInvalidateRange((UINTPTR)MAT_B_T_BASE, bytes);
 
     DMB();
 
@@ -484,16 +489,17 @@ static uint64_t benchmark_matmul(uint32_t N,
     l2_read(ls);
     XTime_GetTime(&t0);
 
-    XMatmul_Set_A(&matmul_hw, SRC_BASE);
-    XMatmul_Set_B(&matmul_hw, MAT_B_BASE);
-    XMatmul_Set_C(&matmul_hw, DST_BASE);
-    XMatmul_Set_N(&matmul_hw, N);
+    XMatmul_Set_A(&matmul_hw,   SRC_BASE);
+    XMatmul_Set_B(&matmul_hw,   MAT_B_BASE);
+    XMatmul_Set_B_T(&matmul_hw, MAT_B_T_BASE);   /* HW transposes B internally */
+    XMatmul_Set_C(&matmul_hw,   DST_BASE);
+    XMatmul_Set_N(&matmul_hw,   N);
     XMatmul_Start(&matmul_hw);
 
     while (!XMatmul_IsDone(&matmul_hw));   /* poll ap_done */
 
     /* Invalidate DST — HP0 wrote to DDR, PS cache holds stale zeros */
-    Xil_DCacheInvalidateRange((UINTPTR)DST_BASE, bytes);
+    Xil_DCacheInvalidateRange((UINTPTR)DST_BASE, N * N * sizeof(float));
 
     XTime_GetTime(&t1);
     pmu_read_all(pe);

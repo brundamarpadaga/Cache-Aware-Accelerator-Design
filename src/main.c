@@ -35,9 +35,10 @@
 XMatmul matmul_hw;
 
 /* MAT_A/B/C base addresses — must match benchmark.c memory map. */
-#define MAT_A_BASE  0x10000000UL
-#define MAT_B_BASE  0x10400000UL
-#define MAT_C_BASE  0x10800000UL
+#define MAT_A_BASE    0x10000000UL
+#define MAT_B_BASE    0x10400000UL
+#define MAT_C_BASE    0x10800000UL
+#define MAT_B_T_BASE  0x10C00000UL           /* B transposed scratch — HW writes here */
 #define MAT_A  ((volatile float *)MAT_A_BASE)
 #define MAT_B  ((volatile float *)MAT_B_BASE)
 #define MAT_C  ((volatile float *)MAT_C_BASE)
@@ -113,11 +114,16 @@ int main(void)
     Xil_DCacheFlushRange((UINTPTR)MAT_B_BASE, 4 * 4 * sizeof(float));
     for (int i = 0; i < 4 * 4; i++) MAT_C[i] = 0.0f;
     Xil_DCacheFlushRange((UINTPTR)MAT_C_BASE, 4 * 4 * sizeof(float));
+    /* Invalidate B_T scratch region — HW writes it via HP0 then reads via ACP.
+     * Without this, SCU may serve stale PS cache lines at 0x10C00000 instead
+     * of the freshly written DDR data, producing NaN results.               */
+    Xil_DCacheInvalidateRange((UINTPTR)MAT_B_T_BASE, 4 * 4 * sizeof(float));
 
-    XMatmul_Set_A(&matmul_hw, MAT_A_BASE);
-    XMatmul_Set_B(&matmul_hw, MAT_B_BASE);
-    XMatmul_Set_C(&matmul_hw, MAT_C_BASE);
-    XMatmul_Set_N(&matmul_hw, 4);
+    XMatmul_Set_A(&matmul_hw,   MAT_A_BASE);
+    XMatmul_Set_B(&matmul_hw,   MAT_B_BASE);
+    XMatmul_Set_B_T(&matmul_hw, MAT_B_T_BASE);
+    XMatmul_Set_C(&matmul_hw,   MAT_C_BASE);
+    XMatmul_Set_N(&matmul_hw,   4);
     XMatmul_Start(&matmul_hw);
     while (!XMatmul_IsDone(&matmul_hw));
 
@@ -136,7 +142,7 @@ int main(void)
     if (errors == 0) {
         xil_printf("MATMUL PASS\r\n");
     } else {
-        xil_printf("MATMUL FAIL (%d errors) — do not trust benchmark results\r\n",
+        xil_printf("MATMUL FAIL (%d errors) - do not trust benchmark results\r\n",
                    errors);
         while (1) { /* halt */ }
     }
