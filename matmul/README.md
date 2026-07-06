@@ -363,7 +363,7 @@ A few non-obvious things learned while wiring this into the block design:
 
 ---
 
-## 7. Current Status
+## 7. Current Status (superseded — see Section 13)
 
 ```
 ✓ figures2  — ACP vs HP0 vs SW baseline, clean results, analyzed
@@ -375,92 +375,128 @@ A few non-obvious things learned while wiring this into the block design:
 ✗ TILE=16 bitstream fails DSP placement (1312 needed vs 220 available)
 ✓ TILE=4: resynthesized with TILE=4, confirm DSP count fits in HLS
   synthesis report before regenerating the bitstream
-□ Pending: run C Simulation in Vitis HLS against a software reference
-  (identity-matrix test) to verify kernel correctness before re-export —
-  not yet done, recommended before burning another bitstream cycle
-✓: re-export IP → refresh Vivado IP catalog → reconnect
+✓ C Simulation run against software reference — caught a real
+  correctness bug (Section 8), fixed, re-verified passing
+✓ re-export IP → refresh Vivado IP catalog → reconnect
   matmul_0 → regenerate bitstream
-□ Pending: hardware correctness check (4×4 identity matrix) on the
-  actual board before running the full sweep
+✓ hardware correctness check (N=4) — see Sections 9–12 for the full
+  non-determinism investigation this uncovered
 □ Pending: figures4 — full N=32..512 sweep with the corrected/tiled
   accelerator (ACP, HP0, SW, MATMUL all in one comparison)
 □ Pending: final report incorporating all four benchmark rounds
 ```
 
-**Immediate next step:** change `#define TILE 16` to `#define TILE 4` in
-`matmul.cpp`, run C Simulation to check correctness, then re-run C
-Synthesis and confirm DSP usage is under 220 before touching Vivado.
+This checklist is out of date the moment `TILE=4` hardware testing
+began — see Section 13 for the current, accurate status. Left here
+unedited as a record of what was known at the time.
 
 ---
 
-## 8. File Locations
+## 8. Critical Bug — `b_tile` Indexing Swap
+
+C Simulation (run before touching hardware, per the note at the end of
+Section 7) caught a real correctness bug in the tiled compute loop:
+
+```cpp
+// WRONG — as originally written
+sum += a_tile[i][k] * b_tile[k][j];
+```
+
+`b_tile` is loaded with the convention `b_tile[j][k]` (first index =
+output column / row of `B_T`, second index = the `k` summed over):
+
+```cpp
+for (int j = 0; j < TILE; j++)
+    for (int k = 0; k < TILE; k++) {
+        #pragma HLS PIPELINE II=1
+        b_tile[j][k] = B_T[(tj + j) * N + (tk + k)];
+    }
+```
+
+The compute loop swapped the indices — `b_tile[k][j]` instead of
+`b_tile[j][k]` — which silently transposes which dimension is treated
+as "row" and which is "sum index" inside the tile. This is wrong on
+**75% of outputs** (every index where `j ≠ k`), and diagonal-heavy test
+inputs (e.g. identity matrices) can mask it almost entirely, which is
+exactly why a patterned, non-symmetric test matrix (`matmul_tb_pattern.cpp`)
+was written — a symmetric/identity-only testbench would not reliably
+have caught this.
+
+**Fix:**
+```cpp
+sum += a_tile[i][k] * b_tile[j][k];   // NOT b_tile[k][j]
+```
+
+**Verified via C Simulation, both testbenches:**
+- `matmul_tb.cpp` — N=16, identity A — PASSED
+- `matmul_tb_pattern.cpp` — N=32, patterned/non-symmetric A — PASSED
+
+---
+
+## 9. Hardware Non-Determinism — AXI Write/Read Race on `B_T`
+
+With the `b_tile` bug fixed and C Simulation passing, Member B's
+hardware correctness check produced **non-deterministic garbage**:
 
 ```
-matmul_hls/matmul.cpp     HLS source (transpose + tiled matmul kernel)
-matmul_hls/export.zip     Exported Vivado IP (regenerate after each
-                           HLS change — re-export, don't reuse a stale zip)
-project_2/                Vivado project (block design: system.bd)
-```
-9. Hardware Non-Determinism — AXI Write/Read Race on B_T
-
-With the b_tile bug fixed and C Simulation passing, Member B's
-hardware correctness check produced non-deterministic garbage:
-
 MISMATCH [2]: got 0x7FC00000 (NaN)  expected 0x40400000 (3.0)
 MISMATCH [4]: got 0x00000000 (0.0)  expected 0x40A00000 (5.0)
+```
 
-Critically, re-running the identical test produced different
-garbage each time — not the same wrong values repeated. That
+Critically, **re-running the identical test produced *different*
+garbage each time** — not the same wrong values repeated. That
 signature rules out a deterministic logic bug (which the b_tile fix
 already addressed and C Simulation already confirmed) and points at a
-race condition, not a math error.
+**race condition**, not a math error.
 
-Root cause
+### Root cause
 
-The kernel's internal transpose(B, B_T, N) writes B_T to DDR, and
-matmul_tiled(A, B_T, C, N) immediately reads it back — both through
-the same shared m_axi_ACP bundle (A, B, and B_T all merged into
-one master port per Section 6). transpose's ap_done firing only
-guarantees its writes were accepted into the AXI adapter's outstanding
-queue (num_write_outstanding=16) — not that they've physically
+The kernel's internal `transpose(B, B_T, N)` writes `B_T` to DDR, and
+`matmul_tiled(A, B_T, C, N)` immediately reads it back — both through
+the same shared `m_axi_ACP` bundle (`A`, `B`, and `B_T` all merged into
+one master port per Section 6). `transpose`'s `ap_done` firing only
+guarantees its writes were **accepted into the AXI adapter's outstanding
+queue** (`num_write_outstanding=16`) — not that they've physically
 drained through the AXI4→AXI3 protocol converter and landed in DDR.
-matmul_tiled's reads on the same bundle can be issued while writes
-from transpose are still in flight, with no ordering guarantee
+`matmul_tiled`'s reads on the same bundle can be issued while writes
+from `transpose` are still in flight, with no ordering guarantee
 between them. Since real AXI bus arbitration timing varies run to run,
 the garbage varies run to run too — consistent with everything observed.
 
-Two fixes considered
+### Two fixes considered
 
+1. **Move the transpose to software** (PS side), with
+   `Xil_DCacheFlushRange` as a hard barrier before starting the
+   accelerator. Removes the in-kernel write-then-read entirely.
+   **Rejected** — kept the transpose in hardware per project scope.
+2. **Split `B_T` onto its own `m_axi` bundle with
+   `num_write_outstanding=1` / `num_read_outstanding=1`.** Forces the
+   AXI adapter to fully drain (BRESP received) before issuing the next
+   command on that bundle — making the write-before-read ordering a
+   property of the adapter's command queue rather than an assumption
+   about `ap_done` timing. **Not yet applied** — see Section 13.
 
-Move the transpose to software (PS side), with
-Xil_DCacheFlushRange as a hard barrier before starting the
-accelerator. Removes the in-kernel write-then-read entirely.
-Rejected — kept the transpose in hardware per project scope.
-Split B_T onto its own m_axi bundle with
-num_write_outstanding=1 / num_read_outstanding=1. Forces the
-AXI adapter to fully drain (BRESP received) before issuing the next
-command on that bundle — making the write-before-read ordering a
-property of the adapter's command queue rather than an assumption
-about ap_done timing. Not yet applied — see Section 13.
+---
 
+## 10. Transpose Burst Optimization (Tile-Buffered Load/Store)
 
-
-10. Transpose Burst Optimization (Tile-Buffered Load/Store)
-
-Independent of the race investigation, the original transpose() had
+Independent of the race investigation, the original `transpose()` had
 a burst-friendliness problem of its own:
 
-cppB_T[j * N + i] = B[i * N + j];   // read bursts (row-sequential),
+```cpp
+B_T[j * N + i] = B[i * N + j];   // read bursts (row-sequential),
                                   // write is single-beat (strided by N)
+```
 
-The read side (B[i*N+j]) is sequential and bursts cleanly; the write
-side (B_T[j*N+i]) jumps by N every element — one AXI beat per
+The read side (`B[i*N+j]`) is sequential and bursts cleanly; the write
+side (`B_T[j*N+i]`) jumps by `N` every element — one AXI beat per
 transaction, no burst possible.
 
-Fix — buffer a 16×16 tile in BRAM, then write it back with the
-opposite loop order so both sides become sequential bursts:
+**Fix — buffer a 16×16 tile in BRAM, then write it back with the
+opposite loop order** so *both* sides become sequential bursts:
 
-cpp#define T_TILE 16
+```cpp
+#define T_TILE 16
 
 void transpose(float *B, float *B_T, int N) {
     #pragma HLS INLINE off
@@ -486,59 +522,61 @@ void transpose(float *B, float *B_T, int N) {
         }
     }
 }
+```
 
-T_TILE is independent of matmul_tiled's TILE constant — the two
-loops interact only through the fully-written B_T buffer, so they
+`T_TILE` is independent of `matmul_tiled`'s `TILE` constant — the two
+loops interact only through the fully-written `B_T` buffer, so they
 can (and do) use different tile sizes with no correctness impact.
 
-Confirmed at synthesis: both the load loop (VITIS_LOOP_33_4) and
-store loop (VITIS_LOOP_44_6) now infer 16-beat bursts on bundle
-ACP, both at II=1. tile_buf costs 2 BRAM primitives (~0% of
+**Confirmed at synthesis:** both the load loop (`VITIS_LOOP_33_4`) and
+store loop (`VITIS_LOOP_44_6`) now infer 16-beat bursts on bundle
+`ACP`, both at II=1. `tile_buf` costs 2 BRAM primitives (~0% of
 device). Total design DSP usage barely moved (11 DSPs for transpose,
 all address arithmetic) — this is a burst/DDR-traffic fix, not a
 compute fix.
 
-Requires exact tile-size divisibility. The loop structure assumes
-N % T_TILE == 0. At small N (e.g. N=4 used in the hardware
+**Requires exact tile-size divisibility.** The loop structure assumes
+`N % T_TILE == 0`. At small `N` (e.g. `N=4` used in the hardware
 correctness check) this means the tile loop still runs a full 16×16
 pass over a logically 4×4 region, touching DDR addresses past the
 valid matrix — harmless in practice because each buffer's DDR region
 is over-provisioned (4MB per matrix), but worth a mental note if
 buffer sizing ever changes.
 
-Known interaction with Section 9: tiling reduces the number of
-discrete write transactions to B_T by roughly T_TILE× (one 16-beat
+**Known interaction with Section 9:** tiling reduces the *number* of
+discrete write transactions to `B_T` by roughly `T_TILE×` (one 16-beat
 burst instead of 16 single-beat writes), which likely shrinks the race
 window from Section 9 without closing it — see Section 12.
 
+---
 
-11. C/RTL Cosimulation — Getting a Real (Not Estimated) Latency Number
+## 11. C/RTL Cosimulation — Getting a Real (Not Estimated) Latency Number
 
 Wanted actual cycle-accurate timing for the tiled transpose (HLS's
 static Fmax/II figures are pre-place-and-route estimates), which meant
-running cosim_design for the first time on this kernel. This
+running `cosim_design` for the first time on this kernel. This
 surfaced three unrelated bugs before it ran clean — all specific to
 how cosim's C-testbench (C-TB) phase works, none of them present in
 plain C Simulation.
 
-Bug 1 — B_T array depth unspecified on the m_axi pragmas
+### Bug 1 — `B_T` array `depth` unspecified on the `m_axi` pragmas
 
-First cosim attempt crashed silently (SIGSEGV / Windows
-0xC0000005, confirmed via gdb — see below) inside transpose's
-store loop. Root cause: with N a runtime argument, HLS cannot
-statically know how large the memory behind each m_axi pointer needs
+First cosim attempt crashed silently (`SIGSEGV` / Windows
+`0xC0000005`, confirmed via `gdb` — see below) inside `transpose`'s
+store loop. Root cause: with `N` a runtime argument, HLS cannot
+statically know how large the memory behind each `m_axi` pointer needs
 to be for the C-TB simulation memory model, and defaults far too
-small — cosim's internal scratch buffers for A/B/B_T/C came out
-only ~128 floats apart (gdb showed pointer addresses 0x70fa00,
-0x70f800, 0x70f600, 0x70f400 — 0x200-byte, i.e. 512-byte,
-spacing) versus the ~4096 bytes (N*N floats) actually needed for
-N=32. Purely a simulation-modeling artifact — no effect on real
-hardware, where the accelerator has no array-bounds concept and just
+small — cosim's internal scratch buffers for `A`/`B`/`B_T`/`C` came out
+only ~128 floats apart (`gdb` showed pointer addresses `0x70fa00`,
+`0x70f800`, `0x70f600`, `0x70f400` — 0x200-byte, i.e. 512-byte,
+spacing) versus the ~4096 bytes (`N*N` floats) actually needed for
+`N=32`. **Purely a simulation-modeling artifact — no effect on real
+hardware**, where the accelerator has no array-bounds concept and just
 follows AXI addresses.
 
-Fix — add depth=MAX_N*MAX_N to every m_axi port:
-
-cpp#pragma HLS INTERFACE m_axi port=A   bundle=ACP offset=slave depth=MAX_N*MAX_N \
+**Fix — add `depth=MAX_N*MAX_N` to every `m_axi` port:**
+```cpp
+#pragma HLS INTERFACE m_axi port=A   bundle=ACP offset=slave depth=MAX_N*MAX_N \
     num_read_outstanding=16 max_read_burst_length=16
 #pragma HLS INTERFACE m_axi port=B   bundle=ACP offset=slave depth=MAX_N*MAX_N \
     num_read_outstanding=16 max_read_burst_length=16
@@ -546,135 +584,141 @@ cpp#pragma HLS INTERFACE m_axi port=A   bundle=ACP offset=slave depth=MAX_N*MAX_
     num_read_outstanding=16 max_read_burst_length=16
 #pragma HLS INTERFACE m_axi port=C   bundle=HP0 offset=slave depth=MAX_N*MAX_N \
     num_write_outstanding=16 max_write_burst_length=16
+```
 
-Bug 2 — testbench arrays sized to N*N, not MAX_N*MAX_N
+### Bug 2 — testbench arrays sized to `N*N`, not `MAX_N*MAX_N`
 
-With depth now telling cosim's copy-in step to expect
-MAX_N*MAX_N (262,144) elements per pointer, it read straight off the
-end of the testbench's actual N*N-sized (1,024-float) static arrays —
-crash moved to copy_in/onebyonecpy_hls.p0a262144f32 (the 262144
+With `depth` now telling cosim's copy-in step to expect
+`MAX_N*MAX_N` (262,144) elements per pointer, it read straight off the
+end of the testbench's actual `N*N`-sized (1,024-float) static arrays —
+crash moved to `copy_in`/`onebyonecpy_hls.p0a262144f32` (the `262144`
 in that symbol name being the giveaway).
 
-Fix — size the testbench buffers for the worst case, use only the
-first N*N elements:
-
-cpp#define MAX_N 512   // must match matmul.cpp's MAX_N
+**Fix** — size the testbench buffers for the worst case, use only the
+first `N*N` elements:
+```cpp
+#define MAX_N 512   // must match matmul.cpp's MAX_N
 static float A[MAX_N*MAX_N], B[MAX_N*MAX_N], B_T[MAX_N*MAX_N],
              C[MAX_N*MAX_N], C_ref[MAX_N*MAX_N];
+```
 
-Diagnostic method — gdb on the cosim C-TB executable
+### Diagnostic method — `gdb` on the cosim C-TB executable
 
-Both bugs above produced no printed output at all (no MISMATCH,
-no TEST PASSED/FAILED) — a strong signal of a genuine crash rather
+Both bugs above produced **no printed output at all** (no `MISMATCH`,
+no `TEST PASSED/FAILED`) — a strong signal of a genuine crash rather
 than a detected mismatch, since a real mismatch would still reach the
-printf calls first. Confirmed and located via gdb directly on the
+`printf` calls first. Confirmed and located via `gdb` directly on the
 generated C-TB executable:
-
-powershellcd matmul_hls/solution1/sim/wrapc
+```powershell
+cd matmul_hls/solution1/sim/wrapc
 & "<vitis-install>/tps/win64/msys64/mingw64/bin/gdb.exe" .\cosim.tv.exe
 (gdb) run
 (gdb) bt
-
-bt gave an exact function/line backtrace each time, which is what
+```
+`bt` gave an exact function/line backtrace each time, which is what
 made both bugs identifiable in one pass rather than by guessing.
 
-Environment note: after killing a crashed cosim.tv.exe under
-gdb, Windows can leave a zombie-looking process holding a file lock
-on sim/wrapc (0 handles, Access is denied from a normal
-PowerShell). Required an elevated (Run as Administrator)
-Stop-Process -Id <pid> -Force / taskkill /F /PID <pid> to actually
-clear it before cosim_design could regenerate that folder.
+**Environment note:** after killing a crashed `cosim.tv.exe` under
+`gdb`, Windows can leave a zombie-looking process holding a file lock
+on `sim/wrapc` (`0 handles`, `Access is denied` from a normal
+PowerShell). Required an elevated (`Run as Administrator`)
+`Stop-Process -Id <pid> -Force` / `taskkill /F /PID <pid>` to actually
+clear it before `cosim_design` could regenerate that folder.
 
+---
 
-12. Cosimulation Result — PASS, First Real Cycle-Accurate Number
+## 12. Cosimulation Result — PASS, First Real Cycle-Accurate Number
 
 With both bugs above fixed, cosim ran clean end-to-end:
 
+```
 C TB testing: TEST PASSED
 RTL (Verilog) cosim: Pass
 Latency: 69,142 clock cycles (min = avg = max)
+```
 
-What "Pass" confirms: the actual generated RTL — real AXI burst
+**What "Pass" confirms:** the actual generated RTL — real AXI burst
 transactions, real pipeline fill/drain, real handshaking — produced
-bit-identical output to the C model for N=32. Stronger evidence than
+bit-identical output to the C model for `N=32`. Stronger evidence than
 C Simulation alone, since it exercises real hardware timing behavior,
 not just the algorithm.
 
-Real-time conversion:
+**Real-time conversion:**
+- At the 10ns/100MHz HLS synthesis clock (what cosim ran at):
+  `69,142 × 10ns ≈ 691µs`
+- At the actual deployed clock (`clk_fpga_0` @ 50MHz / 20ns, per Vivado):
+  `69,142 × 20ns ≈ 1.38ms` for `N=32`
 
-
-At the 10ns/100MHz HLS synthesis clock (what cosim ran at):
-69,142 × 10ns ≈ 691µs
-At the actual deployed clock (clk_fpga_0 @ 50MHz / 20ns, per Vivado):
-69,142 × 20ns ≈ 1.38ms for N=32
-
-
-What this does not confirm: cosim uses a behavioral AXI model,
+**What this does *not* confirm:** cosim uses a behavioral AXI model,
 not the real Zynq PS/SCU/protocol-converter path — it cannot reproduce
 the Section 9 race. A cosim pass is not evidence the race is fixed;
 it's evidence the transpose tiling (Section 10) is functionally and
 timing-correct in isolation.
 
+---
 
-13. Hardware Re-test with Tiled Transpose — Promising, Not Conclusive
+## 13. Hardware Re-test with Tiled Transpose — Promising, Not Conclusive
 
-Member B re-ran the hardware correctness check on the newest .xsa
-(tiled transpose, TILE=4, race fix from Section 9 not yet
-applied):
+Member B re-ran the hardware correctness check on the newest `.xsa`
+(tiled transpose, `TILE=4`, **race fix from Section 9 not yet
+applied**):
 
+```
 Running matmul correctness check (N=4)...
 MATMUL PASS
+```
 
-Followed by a full figures4-style benchmark sweep (N=32..512, ACP /
+Followed by a full `figures4`-style benchmark sweep (N=32..512, ACP /
 HP0 / MATMUL) — all runs at every N passed with no NaN/zero
 corruption.
 
-Why this is good news but not "the race is fixed"
+### Why this is good news but not "the race is fixed"
 
-A single clean pass at N=4 is weak evidence for a probabilistic race.
-Per Section 10, tiling cut the number of discrete B_T write
-transactions by roughly T_TILE× — at N=4 this shrinks an already
+A single clean pass at `N=4` is weak evidence for a probabilistic race.
+Per Section 10, tiling cut the number of discrete `B_T` write
+transactions by roughly `T_TILE×` — at `N=4` this shrinks an already
 tiny transaction count to almost nothing, which could produce a clean
-pass simply because the race window got very small, without the
-underlying ordering guarantee actually existing. The repeated-run,
+pass simply because the race window got very small, **without the
+underlying ordering guarantee actually existing**. The repeated-run,
 larger-N sweep is stronger evidence than the N=4 check alone, but the
 bundle-split fix (Section 9, option 2) still hasn't been applied — this
 should be treated as "probably improved, not architecturally resolved"
 until that fix is in and re-tested, or until many repeated runs at
 larger N (64, 128, 256) show zero flakiness.
 
-Performance finding from the same sweep — TILE=4 reuse bottleneck
+### Performance finding from the same sweep — `TILE=4` reuse bottleneck
 
+```
 MATMUL,512,7113172,...   (~7.11 seconds at N=512)
+```
 
 Worked backward from per-loop synthesis latencies:
+- Transpose (T_TILE=16): `(512/16)² × 538 cycles ≈ 551K cycles ≈ 11ms`
+  — negligible, confirms Section 10's fix isn't the bottleneck.
+- `matmul_tiled` (TILE=4): per `tk` step, A-tile load (~29 cyc) +
+  B_T-tile load (~29 cyc) + compute (~35 cyc) ≈ 93 cycles, run
+  sequentially (no load/compute overlap). For N=512: `128 tk-steps ×
+  16,384 output tiles × ~93 cycles ≈ 196M cycles ≈ 3.9s` at the ideal
+  HLS latency estimate — same order of magnitude as the measured 7.11s,
+  the gap attributable to real AXI/SCU round-trip overhead the static
+  per-loop II estimate doesn't model.
 
-
-Transpose (T_TILE=16): (512/16)² × 538 cycles ≈ 551K cycles ≈ 11ms
-— negligible, confirms Section 10's fix isn't the bottleneck.
-matmul_tiled (TILE=4): per tk step, A-tile load (~29 cyc) +
-B_T-tile load (~29 cyc) + compute (~35 cyc) ≈ 93 cycles, run
-sequentially (no load/compute overlap). For N=512: 128 tk-steps × 16,384 output tiles × ~93 cycles ≈ 196M cycles ≈ 3.9s at the ideal
-HLS latency estimate — same order of magnitude as the measured 7.11s,
-the gap attributable to real AXI/SCU round-trip overhead the static
-per-loop II estimate doesn't model.
-
-
-Root cause: TILE=4 gives poor DDR-transaction reuse — every tk
-step fetches a 4×4 tile (16 elements) of A and B_T to do 16
+**Root cause: `TILE=4` gives poor DDR-transaction reuse** — every `tk`
+step fetches a 4×4 tile (16 elements) of `A` and `B_T` to do 16
 multiply-accumulates: one DDR round trip per useful MAC, with nothing
 to hide the round-trip latency behind (load and compute run strictly
 sequentially, no double-buffering).
 
-Next optimization identified, not yet applied: increase TILE
-(current DSP usage is 108/220, plenty of headroom for TILE=8 →
+**Next optimization identified, not yet applied:** increase `TILE`
+(current DSP usage is 108/220, plenty of headroom for `TILE=8` →
 ~64 compute DSPs, 4× better reuse-per-transaction) and/or add
 ping-pong double-buffering between the load and compute stages so the
 next tile's load overlaps the current tile's compute instead of
 sitting in series on the critical path.
 
-Updated status checklist (supersedes Section 7)
+### Updated status checklist (supersedes Section 7)
 
+```
 ✓ b_tile indexing bug found (C Sim) and fixed
 ✓ AXI write/read race on B_T diagnosed (root cause understood,
   fix designed, not yet applied — Section 9)
@@ -692,11 +736,15 @@ Updated status checklist (supersedes Section 7)
 □ Pending: TILE=4 → TILE=8 (or double-buffering) to address the
   ~7.1s @ N=512 performance bottleneck identified above
 □ Pending: final report incorporating all four benchmark rounds
+```
 
+---
 
-14. File Locations
+## 14. File Locations
 
+```
 matmul_hls/matmul.cpp     HLS source (transpose + tiled matmul kernel)
 matmul_hls/export.zip     Exported Vivado IP (regenerate after each
                            HLS change — re-export, don't reuse a stale zip)
 project_2/                Vivado project (block design: system.bd)
+```
