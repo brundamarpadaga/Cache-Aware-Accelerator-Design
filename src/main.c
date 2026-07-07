@@ -101,41 +101,47 @@ int main(void)
     xil_printf("matmul_0 base addr : 0x%08lX\r\n",
                (unsigned long)XPAR_MATMUL_0_S_AXI_CONTROL_BASEADDR);
 
-    /* ── Correctness check: 4×4 identity × known pattern (result must = B) */
-    xil_printf("Running matmul correctness check (N=4)...\r\n");
-    for (int i = 0; i < 4; i++)
-        for (int j = 0; j < 4; j++)
-            MAT_A[i * 4 + j] = (i == j) ? 1.0f : 0.0f;   /* identity */
-    for (int i = 0; i < 4; i++)
-        for (int j = 0; j < 4; j++)
-            MAT_B[i * 4 + j] = (float)(i * 4 + j + 1);   /* known pattern */
+    /* ── Correctness check: 32×32 identity × known pattern (result must = B)
+     * N=32 is the minimum valid size: kernel requires N to be a multiple of
+     * FETCH_TILE=8 and T_TILE=16, so N must be a multiple of 16.
+     * N=4 (previous check) is smaller than FETCH_TILE and causes out-of-bounds
+     * tile loop accesses — it is not a supported kernel input size.           */
+#define CHECK_N 32
+    xil_printf("Running matmul correctness check (N=%d)...\r\n", CHECK_N);
+    for (int i = 0; i < CHECK_N; i++)
+        for (int j = 0; j < CHECK_N; j++)
+            MAT_A[i * CHECK_N + j] = (i == j) ? 1.0f : 0.0f;  /* identity */
+    for (int i = 0; i < CHECK_N; i++)
+        for (int j = 0; j < CHECK_N; j++)
+            MAT_B[i * CHECK_N + j] = (float)(i * CHECK_N + j + 1); /* known */
 
-    Xil_DCacheFlushRange((UINTPTR)MAT_A_BASE, 4 * 4 * sizeof(float));
-    Xil_DCacheFlushRange((UINTPTR)MAT_B_BASE, 4 * 4 * sizeof(float));
-    for (int i = 0; i < 4 * 4; i++) MAT_C[i] = 0.0f;
-    Xil_DCacheFlushRange((UINTPTR)MAT_C_BASE, 4 * 4 * sizeof(float));
+    Xil_DCacheFlushRange((UINTPTR)MAT_A_BASE, CHECK_N * CHECK_N * sizeof(float));
+    Xil_DCacheFlushRange((UINTPTR)MAT_B_BASE, CHECK_N * CHECK_N * sizeof(float));
+    for (int i = 0; i < CHECK_N * CHECK_N; i++) MAT_C[i] = 0.0f;
+    Xil_DCacheFlushRange((UINTPTR)MAT_C_BASE, CHECK_N * CHECK_N * sizeof(float));
     /* Invalidate B_T scratch region — HW writes it via HP0 then reads via ACP.
      * Without this, SCU may serve stale PS cache lines at 0x10C00000 instead
      * of the freshly written DDR data, producing NaN results.               */
-    Xil_DCacheInvalidateRange((UINTPTR)MAT_B_T_BASE, 4 * 4 * sizeof(float));
+    Xil_DCacheInvalidateRange((UINTPTR)MAT_B_T_BASE, CHECK_N * CHECK_N * sizeof(float));
 
     XMatmul_Set_A(&matmul_hw,   MAT_A_BASE);
     XMatmul_Set_B(&matmul_hw,   MAT_B_BASE);
     XMatmul_Set_B_T(&matmul_hw, MAT_B_T_BASE);
     XMatmul_Set_C(&matmul_hw,   MAT_C_BASE);
-    XMatmul_Set_N(&matmul_hw,   4);
+    XMatmul_Set_N(&matmul_hw,   CHECK_N);
     XMatmul_Start(&matmul_hw);
     while (!XMatmul_IsDone(&matmul_hw));
 
-    Xil_DCacheInvalidateRange((UINTPTR)MAT_C_BASE, 4 * 4 * sizeof(float));
+    Xil_DCacheInvalidateRange((UINTPTR)MAT_C_BASE, CHECK_N * CHECK_N * sizeof(float));
 
     int errors = 0;
-    for (int i = 0; i < 4 * 4; i++) {
+    for (int i = 0; i < CHECK_N * CHECK_N; i++) {
         if (MAT_C[i] != MAT_B[i]) {
-            xil_printf("  MISMATCH [%d]: got 0x%08lX expected 0x%08lX\r\n",
-                       i,
-                       (unsigned long)*(uint32_t *)&MAT_C[i],
-                       (unsigned long)*(uint32_t *)&MAT_B[i]);
+            if (errors < 16)   /* print first 16 mismatches only */
+                xil_printf("  MISMATCH [%d]: got 0x%08lX expected 0x%08lX\r\n",
+                           i,
+                           (unsigned long)*(uint32_t *)&MAT_C[i],
+                           (unsigned long)*(uint32_t *)&MAT_B[i]);
             errors++;
         }
     }
