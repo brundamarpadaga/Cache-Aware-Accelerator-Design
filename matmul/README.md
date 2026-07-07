@@ -740,7 +740,304 @@ sitting in series on the critical path.
 
 ---
 
-## 14. File Locations
+## 14. `TILE=8` Attempt — DSP Overflow, and Why the Estimate Was Wrong
+
+With the `FETCH_TILE=8`/`TILE=4` bottleneck from Section 13 identified,
+the first thing tried was simply increasing `TILE` (the fully-unrolled
+compute engine) from 4 to 8, on the assumption that DSP cost scales
+roughly linearly with `TILE` (the ~64-DSP estimate cited at the end of
+Section 13).
+
+**That assumption was wrong.** `place_design` failed immediately:
+```
+DRC UTLZ-1: This design requires 336 of such cell types but only 220
+compatible sites are available in the target device.
+```
+
+Checking actual synthesis numbers against `TILE` size:
+
+| TILE | Unrolled MACs (TILE²) | Actual DSPs | Ratio |
+|---|---|---|---|
+| 4 | 16 | 97 | ≈5.5× |
+| 8 | 64 | 336 | ≈5.25× |
+| 16 | 256 | 1312 (Section 5) | ≈5.1× |
+
+**DSP cost scales as `TILE²`, not `TILE`** — both `j` and `k` are fully
+unrolled in the compute loop, so the number of parallel `fmul`/`fadd`
+units is `TILE (j) × TILE (k)`. The ≈5× DSPs-per-MAC multiplier is
+consistent across all three data points (the `fmul` core costs ~3
+DSPs, the `fadd` reduction tree ~2, per unrolled element). There is no
+power-of-2 `TILE` between 4 and 8 to fall back to — `TILE=8` is simply
+~3.4× over budget, not a small overshoot.
+
+Two options considered: (A) switch to a leaner DSP-per-MAC
+implementation via `#pragma HLS BIND_OP ... impl=meddsp/fabric`
+(trades LUTs, which are only 41% used, for fewer DSPs, but doesn't fix
+the actual DDR-round-trip problem), or (B) decouple "how much data is
+fetched per DDR trip" from "how many DSPs are used," structurally.
+**Option B chosen** — see Section 15.
+
+---
+
+## 15. `FETCH_TILE=8` — Decoupling DDR Fetch Size from Compute Engine Size
+
+The insight: keep the existing `TILE=4` compute engine exactly as-is
+(same DSP budget, same unrolled `j`/`k` structure that gave II=1 back
+in Section 4), but fetch a **bigger** block per DDR round-trip
+(`FETCH_TILE=8`, i.e. 4× the data), and loop over four `TILE=4`
+sub-blocks of that bigger fetched tile to consume it:
+
+```cpp
+#define TILE        4    // compute sub-tile — DSP budget, unchanged
+#define FETCH_TILE  8    // DDR fetch tile — data per round-trip
+                          // FETCH_TILE must be a multiple of TILE
+                          // N must be a multiple of FETCH_TILE
+
+// per tk step: fetch FETCH_TILE x FETCH_TILE of A and B_T (one
+// larger burst instead of TILE=4's smaller one), then consume it
+// via nested si/sj/sk loops over TILE-sized sub-blocks:
+for (int si = 0; si < FETCH_TILE; si += TILE) {
+    for (int sj = 0; sj < FETCH_TILE; sj += TILE) {
+        for (int sk = 0; sk < FETCH_TILE; sk += TILE) {
+            for (int i = 0; i < TILE; i++) {
+                #pragma HLS PIPELINE II=1
+                for (int j = 0; j < TILE; j++) {
+                    #pragma HLS UNROLL
+                    float sum = 0.0f;
+                    for (int k = 0; k < TILE; k++) {
+                        #pragma HLS UNROLL
+                        sum += a_tile[si+i][sk+k] * b_tile[sj+j][sk+k];
+                    }
+                    c_tile[si+i][sj+j] += sum;
+                }
+            }
+        }
+    }
+}
+```
+
+This cuts `tk`-iterations (the thing that costs a DDR round-trip each
+time) from `N/TILE` to `N/FETCH_TILE` — at N=512, 128 → 64 per output
+tile, ~8× fewer total round-trips across the whole matmul
+(`(FETCH_TILE/TILE)³`), while the actual unrolled MAC engine — and
+therefore DSP count — stays unchanged.
+
+---
+
+## 16. II=2 Violation from Automatic Loop Flattening — Root Cause and Fix
+
+First synthesis attempt at the Section 15 structure passed C
+Simulation but **failed the loop constraint check**:
+```
+WARNING: [HLS 200-880] The II Violation ...: Unable to enforce a
+carried dependence constraint (II = 1, distance = 4, offset = 1)
+between 'store' ... and 'load' ... on array 'c_tile'.
+Pipelining result : Target II = 1, Final II = 2, Depth = 33
+INFO: [HLS 200-790] **** Loop Constraint Status: All loop constraints
+were NOT satisfied.
+```
+
+**Root cause:** `sk`'s loop body contains exactly one child loop (the
+`i` loop) — a perfect nest, which is precisely the shape HLS's
+automatic loop-flattening looks for. It silently merged `sk` straight
+into the `i`/`j`/`k` pipeline, with no warning, into one continuous
+II=1 iteration stream. That meant consecutive `sk` values were treated
+as just more iterations of the same pipeline with no boundary between
+them — so `sk=0`'s write to `c_tile[si+i][sj+j]` could still be in
+flight when `sk=4`'s read of that *same* address tried to start
+(distance=4, matching `FETCH_TILE/TILE`), since the read-modify-write
+accumulation `c_tile[si+i][sj+j] += sum` revisits the same cell once
+per `sk` sub-block by design.
+
+**Why the original (non-sub-tiled) kernel never hit this:** its `tk`
+loop wraps *three* sibling sub-loops (load A, load B_T, compute) —
+`"Cannot flatten loop ... more than one sub loop"` — so HLS refuses to
+auto-flatten it with anything beneath it, for free, purely as a side
+effect of that loop body's shape. `sk` has no such structural
+protection, since its body is a single clean child loop.
+
+**Fix — force the boundary explicitly, since it isn't free here:**
+```cpp
+for (int sk = 0; sk < FETCH_TILE; sk += TILE) {
+    #pragma HLS LOOP_FLATTEN off
+    for (int i = 0; i < TILE; i++) {
+        #pragma HLS PIPELINE II=1
+        ...
+```
+`LOOP_FLATTEN off` makes each `(si,sj,sk)` combination run its
+pipeline to completion — including draining the `c_tile` write —
+before the next `sk` starts, at the cost of a drain/refill penalty at
+each `sk` boundary (small and bounded, since `sk` only has
+`FETCH_TILE/TILE = 2` iterations).
+
+---
+
+## 17. Synthesis Confirmation — Fix Verified
+
+Re-running C Synthesis after Section 16's fix:
+```
+INFO: [HLS 200-790] **** Loop Constraint Status: All loop constraints
+were satisfied.
+```
+- Compute pipeline (`VITIS_LOOP_120_13`, the `i` loop only — `si`/
+  `sj`/`sk` no longer merged in): `Target II = 1, Final II = 1, Depth
+  = 32` — matching the original `TILE=4` engine's depth almost exactly.
+- DSPs: `16 fmul` + `20 fadd` instances — `16 = TILE² = 4²`, confirming
+  DSP count returned to the clean `TILE=4` baseline (~97 total,
+  comfortably under 220), not the artificially-halved count the
+  broken II=2 schedule had shown.
+- Burst lengths unaffected: A/B_T loads still inferring length-8
+  bursts (`FETCH_TILE=8`) — the actual performance goal survived the
+  correction intact.
+- Fmax unchanged at 136.99 MHz — no timing regression.
+
+---
+
+## 18. Cosimulation — Both Testbenches Validated (With Two Detours)
+
+**`matmul_tb.cpp` (identity, N=16):** first cosim attempt after this
+change hit a plain compile error —
+```
+error: 'C_ref' was not declared in this scope
+```
+— an editing slip from the earlier `MAX_N*MAX_N` resizing pass
+(Section 11); the array declaration line had dropped `C_ref` for this
+file specifically. Restored, re-ran: **cosim PASS.**
+
+**`matmul_tb_pattern.cpp` (N=32, patterned):** cosim console showed
+`TEST PASSED` / `*** C/RTL co-simulation finished: PASS ***`, but the
+Vitis HLS GUI's Cosim Report panel displayed `Fail` immediately after
+— traced to a **stale cached view** in the GUI (it had been showing a
+result from an earlier, genuinely-failed run of the same testbench and
+didn't auto-refresh). Confirmed via direct file read + timestamp check
+that the on-disk report matched the passing console run:
+```
+Verilog | Pass | Latency: 42,830 cycles (min=avg=max)
+```
+— down from the pre-`FETCH_TILE=8` baseline of 69,142 cycles at the
+same N=32, a real ~38% cycle-count reduction confirmed at the
+cycle-accurate RTL level, consistent with (though not directly
+proportional to, since fixed overhead is a larger fraction of the
+total at small N) the ~8× round-trip reduction from Section 15.
+
+**Lesson:** when the GUI and a freshly-generated report file disagree,
+trust the file (`solution1/sim/report/matmul_cosim.rpt`) and its
+`LastWriteTime`, not the GUI panel, which can hold a cached view from
+a prior run.
+
+---
+
+## 19. Hardware Validation — N=4 Boundary Bug, N≥32 Clean, Real Speedup Confirmed
+
+Member B's first hardware re-test (still using the old N=4
+correctness-check convention) failed:
+```
+MISMATCH [0]: got 0x40E00000 expected 0x3F800000  (7.0 vs 1.0)
+MISMATCH [1]: got 0x41100000 expected 0x40000000  (9.0 vs 2.0)
+...
+MATMUL FAIL (16 errors)
+```
+
+**This was correctly diagnosed as a new, deterministic bug — not the
+Section 9 race.** Decoding the mismatches: `got = 2×expected + 5`
+exactly, across the first 11 indices — a clean affine relationship, the
+opposite signature of the AXI race (which produces NaN/zero, different
+garbage on every re-run, no algebraic structure). Indices 11–15 showed
+values consistent with reading uninitialized DDR memory entirely.
+
+**Root cause:** `N=4 < FETCH_TILE=8`. The `ti`/`tj` outer loop still
+executes once, but the inner load/compute loops always run their full
+`FETCH_TILE=8` extent regardless of `N` — so the kernel fetched an 8×8
+block and computed an 8×8 output tile against a logically 4×4 matrix,
+reading past the valid region into adjacent/uninitialized memory. Same
+category of bug as the `T_TILE=16`-at-`N=4` case noted back in
+Section 10, except this time the over-fetch was large enough relative
+to the matrix to produce visible corruption rather than landing
+harmlessly in over-provisioned buffer padding.
+
+**Checked against the actual benchmark sweep sizes** — N=32, 64, 128,
+256, 512 are all multiples of 16 (the largest of `FETCH_TILE=8`,
+`TILE=4`, `T_TILE=16`), so all divide cleanly; N=4 was the only tested
+size smaller than `FETCH_TILE` itself. **Fix applied: correctness
+check updated from N=4 to N=32** (documented in
+`figures5-hwAccelerator3-tiling-v2/README`), rather than special-casing
+small-N in the kernel, since N=4 was only ever a smoke test and the
+real sweep never uses it.
+
+**Re-test at N=32 — clean:**
+```
+Running matmul correctness check (N=32)...
+MATMUL PASS
+```
+No corruption at any size in the subsequent full sweep (32–512).
+
+**Real performance result — corrected numbers** (an earlier draft of
+the `figures5` README was generated from a mismatched/stale log and
+overstated HW v3 latency by 33–40% at every N; recalculated directly
+from the UART sweep log's `MATMUL,N,elapsed_us` rows):
+
+```
+  N     HW v2 (us)   HW v3 (us)   Speedup (v2/v3)
+  ---   ----------   ----------   ---------------
+   32        1,985        1,194           1.66x
+   64       14,776        8,545           1.73x
+  128      114,070       64,588           1.77x
+  256      896,958      502,071           1.79x
+  512    7,113,180    3,962,935           1.80x
+```
+
+At N=512: **~7.11s → ~3.96s**, a genuine ~44% reduction, close to the
+~3.9s figure derived analytically from per-loop synthesis latencies
+back in Section 13 — real hardware landing near the ideal-latency
+estimate is a good sign the `FETCH_TILE=8` mental model (fewer, bigger
+DDR round-trips) is actually correct, not just plausible-sounding.
+HW v3 vs SW matmul speedup ranges 2.0–2.5× across N=32–512 (see
+`figures5-hwAccelerator3-tiling-v2/README` for full SW comparison and
+cache-behavior figures).
+
+**Still outstanding — not touched by any of this session's work:**
+the Section 9 AXI write/read race on `B_T` (shared-bundle,
+`num_write_outstanding=16`, no drain guarantee between `transpose`'s
+writes and `matmul_tiled`'s reads). All testing in Sections 17–19
+validates correctness and performance of `FETCH_TILE=8` specifically;
+none of it constitutes evidence for or against the race, since a small
+number of passing runs at moderate N was already established (Section
+13) as weak evidence either way for a probabilistic race. The
+bundle-split fix (`num_write_outstanding=1` on a dedicated `B_T`
+bundle) remains designed but unapplied.
+
+### Updated status checklist (supersedes Section 13)
+
+```
+✓ b_tile indexing bug found (C Sim) and fixed
+✓ AXI write/read race on B_T diagnosed (root cause understood, fix
+  designed, STILL NOT APPLIED — Section 9)
+✓ Transpose re-optimized for burst read+write via tile buffering
+  (Section 10)
+✓ TILE=8 attempted, correctly diagnosed as DSP-infeasible (Section 14)
+✓ FETCH_TILE=8 sub-tiling implemented, decoupling DDR fetch size from
+  compute DSP budget (Section 15)
+✓ II=2 violation from automatic loop flattening found and fixed via
+  LOOP_FLATTEN off (Section 16), reconfirmed at II=1 (Section 17)
+✓ Both testbenches (identity N=16, patterned N=32) passing cosim at
+  the cycle-accurate RTL level (Section 18)
+✓ N=4 boundary bug found and correctly root-caused (N < FETCH_TILE);
+  correctness check moved to N=32 (Section 19)
+✓ Hardware validated clean at N=32..512, no corruption at any tested
+  size
+✓ Real ~44% latency reduction at N=512 confirmed on hardware
+  (7.11s → 3.96s), matching analytical prediction
+✓ figures5 benchmark README corrected after a stale-log discrepancy
+  was caught (33-40% overstatement at every N in the first draft)
+□ Pending: apply Section 9's bundle-split fix and re-test at larger N
+  with many repeated runs before treating the race as resolved —
+  still the single largest open correctness risk in the project
+□ Pending: final report incorporating all five benchmark rounds
+```
+
+---
+
+## 20. File Locations
 
 ```
 matmul_hls/matmul.cpp     HLS source (transpose + tiled matmul kernel)
