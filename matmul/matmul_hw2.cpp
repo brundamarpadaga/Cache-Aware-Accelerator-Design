@@ -85,9 +85,9 @@ void matmul_tiled(float *A, float *B_T, float *C, int N) {
     #pragma HLS ARRAY_PARTITION variable=c_tile complete dim=2
 
     /*Tile loop over output matrix C\
-     * ti: row tile index    (0, 16, 32, ... 496) — 32 iterations
-     * tj: column tile index (0, 16, 32, ... 496) — 32 iterations
-     * Total output tiles: 32 × 32 = 1024 tiles
+     * ti: row tile index    (0, 4, 8, ... 496) — 128 iterations
+     * tj: column tile index (0, 16, 32, ... 496) — 128 iterations
+     * Total output tiles: 128 × 128 = 16384 tiles
      */
     for (int ti = 0; ti < N; ti += TILE) {
         for (int tj = 0; tj < N; tj += TILE) {
@@ -116,7 +116,7 @@ void matmul_tiled(float *A, float *B_T, float *C, int N) {
              */
             for (int tk = 0; tk < N; tk += TILE) {
 
-                /* Step 2 — Load 16×16 tile of A from DDR into BRAM
+                /* Step 2 — Load 4×4 tile of A from DDR into BRAM
                  *
                  * Accesses A[(ti+i)*N + (tk+k)] — sequential for each row i.
                  * HLS infers a burst of TILE=16 beats per row.
@@ -129,7 +129,7 @@ void matmul_tiled(float *A, float *B_T, float *C, int N) {
                     }
                 }
 
-                /* Step 3 — Load 16×16 tile of B_T from DDR into BRAM
+                /* Step 3 — Load 4×4 tile of B_T from DDR into BRAM
                  *
                  * Accesses B_T[(tj+j)*N + (tk+k)] — sequential because B
                  * was transposed. Without transpose this would be strided.
