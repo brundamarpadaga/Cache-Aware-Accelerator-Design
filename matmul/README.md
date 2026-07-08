@@ -1,4 +1,4 @@
-# Matmul Hardware Accelerator — Development README
+# Matmul Hardware Accelerator — Development
 
 Vitis HLS matrix-multiply accelerator for the Cache-Aware Accelerator Design
 project on the Zybo Z7-20 (XC7Z020-1CLG400C). This document tracks the
@@ -275,7 +275,7 @@ Cuts `tk`-iterations from `N/TILE` to `N/FETCH_TILE` — at N=512, 128 →
 | **`matmul_tb.cpp` cosim compile error** | `'C_ref' was not declared in this scope` | Dropped during the earlier `MAX_N*MAX_N` testbench-resizing edit (Section 4), for this file specifically | Restored the declaration |
 | **GUI showed `Fail` after console `PASS`** | Cosim Report panel displayed `Fail` right after a run whose console log clearly ended `TEST PASSED` / `*** PASS ***` | Stale cached GUI view from an earlier, genuinely-failed run of the same testbench; panel didn't auto-refresh | Confirmed via direct file read + `LastWriteTime` on `matmul_cosim.rpt` — file matched the passing run. **Lesson: trust the report file over the GUI panel when they disagree.** |
 | **N=4 correctness check FAIL** | `got = 2×expected + 5` for the first 11 outputs (clean affine pattern, not race-style noise), then uninitialized-looking garbage for the rest | `N=4 < FETCH_TILE=8` — inner load/compute loops always run their full 8×8 extent regardless of `N`, reading past the logical 4×4 matrix into adjacent memory | Correctness check moved from N=4 to **N=32** (smallest size that's a multiple of `FETCH_TILE`/`T_TILE`=16); documented as a hard kernel constraint rather than special-cased |
-| **`figures5` README overstated HW v3 latency 33–40%** | Summary's HW v3 column didn't match the raw UART sweep log at any N, gap widening with N; ACP/HP/HW v2 columns matched fine | Summary appears to have been built from a stale or mismatched log file (header referenced a `hw4` log in a `v2`/`v3`-labeled folder) | Recalculated all HW v3 figures directly from the sweep log's `MATMUL,N,elapsed_us` rows |
+
 
 ### HW v3 result
 
