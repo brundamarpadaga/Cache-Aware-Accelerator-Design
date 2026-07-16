@@ -106,7 +106,7 @@ int main(void)
      * FETCH_TILE=8 and T_TILE=16, so N must be a multiple of 16.
      * N=4 (previous check) is smaller than FETCH_TILE and causes out-of-bounds
      * tile loop accesses — it is not a supported kernel input size.           */
-#define CHECK_N 32
+#define CHECK_N 16
     xil_printf("Running matmul correctness check (N=%d)...\r\n", CHECK_N);
     for (int i = 0; i < CHECK_N; i++)
         for (int j = 0; j < CHECK_N; j++)

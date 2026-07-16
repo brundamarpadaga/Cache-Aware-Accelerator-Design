@@ -41,7 +41,7 @@ This folder contains plots from the fifth benchmark run. HW v3 introduces a two-
 
 ---
 
-## HW v3 vs HW v2 (FETCH_TILE=4 → FETCH_TILE=8)
+## HW v3 vs HW v2 (TILE=4 → TILE = 4, FETCH_TILE=8)
 
 Larger fetch tile reduces DDR round-trips — the same TILE=4 compute engine now processes a bigger on-chip block before going back to DDR, improving bandwidth utilisation without increasing DSP count.
 
