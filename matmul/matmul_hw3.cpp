@@ -9,8 +9,8 @@
 */
 #define MAX_N  512
 
-#define TILE        4   // compute sub-tile — controls unrolled MAC count (DSP budget, unchanged)
-#define FETCH_TILE  16    // DDR fetch tile — controls how much data comes per round-trip
+#define TILE        4    // compute sub-tile — controls unrolled MAC count (DSP budget, unchanged)
+#define FETCH_TILE  8    // DDR fetch tile — controls how much data comes per round-trip
                           // FETCH_TILE must be a multiple of TILE; N must be a multiple of FETCH_TILE
 
 /*Transpose B into B_T
@@ -124,7 +124,7 @@ void matmul_tiled(float *A, float *B_T, float *C, int N) {
                                     float sum = 0.0f;
                                     for (int k = 0; k < TILE; k++) {
                                         #pragma HLS UNROLL
-                                    	sum += a_tile[si + i][sk + k] * b_tile[sj + j][sk + k];
+                                        sum += a_tile[si + i][sk + k] * b_tile[sj + j][sk + k];
                                     }
                                     c_tile[si + i][sj + j] += sum;
                                 }
@@ -172,9 +172,8 @@ void matmul(
         num_read_outstanding=16 max_read_burst_length=16
     #pragma HLS INTERFACE m_axi port=B   bundle=ACP offset=slave depth=MAX_N*MAX_N \
         num_read_outstanding=16 max_read_burst_length=16
-    #pragma HLS INTERFACE m_axi port=B_T bundle=BT   offset=slave depth=512*512 \
-	    num_read_outstanding=1  max_read_burst_length=16 \
-	    num_write_outstanding=1 max_write_burst_length=16
+    #pragma HLS INTERFACE m_axi port=B_T bundle=ACP offset=slave depth=MAX_N*MAX_N \
+        num_read_outstanding=16 max_read_burst_length=16
     #pragma HLS INTERFACE m_axi port=C   bundle=HP0 offset=slave depth=MAX_N*MAX_N \
         num_write_outstanding=16 max_write_burst_length=16
     #pragma HLS INTERFACE s_axilite port=N
