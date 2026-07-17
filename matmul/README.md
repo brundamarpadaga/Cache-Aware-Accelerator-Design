@@ -1,4 +1,4 @@
-# Matmul Hardware Accelerator — Development
+# Matmul Hardware Accelerator — Development README
 
 Vitis HLS matrix-multiply accelerator for the Cache-Aware Accelerator Design
 project on the Zybo Z7-20 (XC7Z020-1CLG400C). This document tracks the
@@ -275,7 +275,7 @@ Cuts `tk`-iterations from `N/TILE` to `N/FETCH_TILE` — at N=512, 128 →
 | **`matmul_tb.cpp` cosim compile error** | `'C_ref' was not declared in this scope` | Dropped during the earlier `MAX_N*MAX_N` testbench-resizing edit (Section 4), for this file specifically | Restored the declaration |
 | **GUI showed `Fail` after console `PASS`** | Cosim Report panel displayed `Fail` right after a run whose console log clearly ended `TEST PASSED` / `*** PASS ***` | Stale cached GUI view from an earlier, genuinely-failed run of the same testbench; panel didn't auto-refresh | Confirmed via direct file read + `LastWriteTime` on `matmul_cosim.rpt` — file matched the passing run. **Lesson: trust the report file over the GUI panel when they disagree.** |
 | **N=4 correctness check FAIL** | `got = 2×expected + 5` for the first 11 outputs (clean affine pattern, not race-style noise), then uninitialized-looking garbage for the rest | `N=4 < FETCH_TILE=8` — inner load/compute loops always run their full 8×8 extent regardless of `N`, reading past the logical 4×4 matrix into adjacent memory | Correctness check moved from N=4 to **N=32** (smallest size that's a multiple of `FETCH_TILE`/`T_TILE`=16); documented as a hard kernel constraint rather than special-cased |
-
+| **`figures5` README overstated HW v3 latency 33–40%** | Summary's HW v3 column didn't match the raw UART sweep log at any N, gap widening with N; ACP/HP/HW v2 columns matched fine | Summary appears to have been built from a stale or mismatched log file (header referenced a `hw4` log in a `v2`/`v3`-labeled folder) | Recalculated all HW v3 figures directly from the sweep log's `MATMUL,N,elapsed_us` rows |
 
 ### HW v3 result
 
@@ -309,7 +309,186 @@ the other.
 
 ---
 
-## 6. Vivado Integration Notes
+## 6. HW v4 — `FETCH_TILE=16` and Dedicated `B_T` AXI Bundle
+
+### Motivation
+
+Two independent threads: keep pushing the DDR round-trip reduction from
+Section 5, and finally apply the AXI-race fix designed back in Section 4
+but never implemented — `A`/`B`/`B_T` still shared one `m_axi_ACP`
+bundle, still the largest open correctness risk in the project.
+
+### Resource exploration — fabric-implemented float multiply
+
+Tried freeing DSP budget via `#pragma HLS BIND_OP variable=prod op=fmul
+impl=fabric` (leaving `fadd` DSP-backed), to see if it would make
+`TILE=8`'s fully-unrolled compute engine finally fit:
+
+| Config | DSP | LUT | Verdict |
+|---|---|---|---|
+| `TILE=4`, `fmul`→DSP (baseline) | 97 (44%) | 41% | — |
+| `TILE=4`, `fmul`→fabric | 51 (23%) | 66% | Fits, II still 1, cosim PASS |
+| `TILE=8`, `fmul`→fabric | 155 (70%) | **100,367 (188%)** | **Infeasible — LUTs, not DSPs** |
+
+`TILE=8` DSP cost was never the real wall once `fmul` was fabric-backed
+(DSPs comfortable at 70%) — but quadrupling fabric-multiply instances
+(`TILE²`) blew LUTs to nearly double the device's capacity instead.
+Confirms DSP-vs-LUT is a real tradeoff, not a free win, and `TILE=4`
+remains the practical ceiling for the fully-unrolled engine.
+
+**`fmul`→fabric was reverted before the hardware test below**, to keep
+the `B_T` bundle-split fix isolated to one variable rather than testing
+it simultaneously with an unrelated datapath change — the two don't
+interact, but a clean attribution mattered more than saving one
+synthesis cycle.
+
+### `FETCH_TILE` 8 → 16
+
+Same mechanism as Section 5's 4→8 change, one more doubling:
+
+| FETCH_TILE | Burst length | Cosim cycles (N=32) |
+|---|---|---|
+| 8 | 8 | 42,830 |
+| 16 | 16 | 32,534 (DSP-mult) → **29,817** (final, with `B_T` split below) |
+
+`(32/16)²` fewer tiles, `N/16` fewer `tk`-steps per tile — same pattern
+as before, diminishing but still real returns. `FETCH_TILE=32` was
+considered but not pursued this round (BRAM cost doubles again, and the
+returns were already narrowing).
+
+### Dedicated `B_T` AXI bundle — the race fix, finally applied
+
+```cpp
+#pragma HLS INTERFACE m_axi port=B_T bundle=BT offset=slave depth=512*512 \
+    num_read_outstanding=1  max_read_burst_length=16 \
+    num_write_outstanding=1 max_write_burst_length=16
+```
+(`A`, `B`, `C` unchanged from Section 4/5.) `B_T` gets its own `m_axi`
+master port with outstanding capped at 1 — the AXI adapter cannot
+issue a new command on this port until the previous one's response
+(BRESP/RLAST) is received, so `transpose`'s write to `B_T` must fully
+drain before `matmul_tiled`'s first `B_T` read can even be dispatched.
+This is the actual ordering guarantee; it sits at the adapter's
+command-queue level, independent of which physical interconnect the
+port is later wired through.
+
+**Confirmed at synthesis:** new `m_axi_BT` interface, burst length
+still 16 (outstanding=1 limits transactions *in flight*, not *burst
+size*), correctly split from `A`/`B`'s `m_axi_ACP`.
+
+### Vivado integration — recreating `matmul_0` drops *all* existing wiring, not just the new port
+
+Adding a third AXI master forced deleting and recreating the `matmul_0`
+IP cell (Vivado's automatic IP *upgrade* path failed with an
+unresolvable `CoreID 2-1279` warning on the new port — delete-and-recreate
+is the reliable path, matching the project's existing IP-cache-staleness
+lesson from Section 7/Vivado notes). The costly discovery: **recreating
+the cell silently drops every pre-existing connection**, not just the
+new one — `m_axi_ACP`, `s_axi_control`, `ap_clk`/`ap_rst_n` all need
+reconnecting, and several came back as *stale nets* (a net with the old
+name still existed on the interconnect side, but wasn't actually
+attached to the new cell's pin) — invisible in the block-design canvas,
+only caught by querying each pin directly from both ends:
+
+| Symptom | Root cause | Fix |
+|---|---|---|
+| `S01_AXI` showed net `/matmul_0_m_axi_ACP`, but `get_bd_intf_nets` on `matmul_0/m_axi_ACP` returned empty | Stale net name left from the deleted cell; new cell's pin was never actually attached | `connect_bd_intf_net` explicitly, re-verify from both ends |
+| Same pattern on `s_axi_control` → `ps7_0_axi_periph/M01_AXI` | Same — stale net, unattached pin | Same fix |
+| `FREQ_HZ` warnings on all four interfaces after recreation | New cell has no `CONFIG.FREQ_HZ`; doesn't propagate automatically from the clock net | `set_property CONFIG.FREQ_HZ 50000000` on each interface explicitly |
+| `HP0` address unassigned (`No address segments matched ... axi_intercon_hp0/S01_AXI`) | New cell → new/cleared address assignment | `assign_bd_address` (broad, re-run for whole design) |
+
+**Lesson for next time:** after any IP cell delete/recreate, verify
+*every* pin's connection from the cell's own side
+(`get_bd_intf_nets -of_objects [get_bd_intf_pins matmul_0/<pin>]`), not
+from the interconnect's side and not by trusting the canvas rendering
+— three separate "already connected" assumptions turned out to be
+stale nets this session, caught only by checking both ends.
+
+### Hardware validation — `figures6`, corrected
+
+```
+  N     HW v3 (µs)   HW v4 (µs)   Speedup      HW v4 vs SW
+  ---   ----------   ----------   ---------    -----------
+   32        1,194          686   1.74×        3.53×
+   64        8,545        4,612   1.85×        4.15×
+  128       64,588       33,552   1.93×        4.55×
+  256      502,071      255,167   1.97×        4.78×
+  512    3,962,935    1,993,172   1.99×         4.89×
+```
+Speedup *increases* with N (opposite of the expected serialization
+penalty from `num_write_outstanding=1`) — suggests the dedicated
+bundle's reduced contention with `A`/`B` traffic outweighs the
+outstanding=1 cost, though `FETCH_TILE=16` and the bundle split
+shipped together here, so exact attribution between the two isn't
+possible from this data alone (flagged in the `figures6` doc itself).
+
+### Correctness-evidence gap found in the benchmark harness itself
+
+Reviewing `benchmark.c`/`main.c` directly (not just log output) found
+the sweep that produces the `figures6` timing table has **no
+correctness checking in any of its 25 runs** — `benchmark_matmul()`
+times `ap_done` and invalidates cache, nothing else; `print_csv_row()`
+has no pass/fail field. The only correctness check is a single,
+one-time, identity-matrix gate at `N=16` in `main()` before the sweep
+starts (halts on failure — good — but doesn't cover N=32..512, and
+identity-`A` doesn't exercise the general accumulation path the way a
+non-symmetric pattern would, same blind spot as the original
+`b_tile` bug).
+
+**Follow-up cross-check** (asymmetric `A`/`B`, `N=32`, bit-exact `!=`
+comparison against a software reference) reported 87 mismatches —
+**decoded as 2 ULP** on every flagged value (e.g.
+`0x4BA1A958` vs `0x4BA1A956`), i.e. floating-point summation-order
+rounding noise (tiled `si`/`sj`/`sk` accumulation vs. linear software
+accumulation), not corruption. Same root issue as the tolerance-based
+comparison already used in `matmul_tb_pattern.cpp`
+(`fabsf(diff) > tol`) — the bare-metal cross-check needs the same
+tolerance logic; bit-exact `!=` will always flag this class of
+harmless rounding difference as a failure.
+
+**Net effect on the race question:** unchanged from Section 4/5 —
+still not resolved either way. `figures6`'s repeated hardware runs
+prove the bundle-split design doesn't hang/crash across N=32–512, but
+provide no correctness evidence at those sizes (sweep has none), and
+the one cross-check that did compare values used the wrong comparison
+method to be conclusive.
+
+### Updated status checklist (supersedes Section 5/13's)
+
+```
+✓ FETCH_TILE 8→16, confirmed at synthesis and cosim (29,817 cycles @ N=32,
+  down from 42,830 at FETCH_TILE=8)
+✓ TILE=8 + fabric-mult explored, correctly diagnosed as LUT-infeasible
+  (188% utilization) — DSP was never actually the wall once mult was
+  fabric-backed; LUTs are
+✓ B_T moved to a dedicated m_axi bundle, num_outstanding=1 — the AXI
+  race fix from Section 4, now actually applied (not just designed)
+✓ Full Vivado re-wiring completed after matmul_0 cell recreation,
+  including catching 3 stale/unattached-pin cases via direct
+  per-pin verification
+✓ Hardware validated across N=32..512, real ~2× speedup over HW v3,
+  ~4.9× over SW at N=512 (figures6, cross-checked against raw log —
+  no stale-data repeat of the figures5 incident)
+✗ Gap found: benchmark sweep has zero correctness checking at the
+  sizes it actually reports timing for (N=32..512) — only a single
+  N=16 identity-matrix gate check runs, before the sweep
+✗ Cross-check test built to close that gap used bit-exact comparison;
+  flagged 87 "mismatches" that decode to 2 ULP floating-point rounding
+  noise, not real errors — needs the same tolerance-based comparison
+  already used in matmul_tb_pattern.cpp
+□ Pending: add tolerance-based correctness checking inside (or
+  alongside) the benchmark sweep itself, across all tested N, not just
+  a single N=16 gate — this is the evidence that would actually confirm
+  or refute the race fix, and it still doesn't exist
+□ Pending: once real per-N correctness data exists, get many repeated
+  runs at larger N (64/128+) specifically — still the strongest
+  remaining test of whether the race is genuinely fixed
+□ Pending: final report incorporating all six benchmark rounds
+```
+
+---
+
+## 7. Vivado Integration Notes
 
 A few non-obvious things learned while wiring this into the block design:
 
@@ -341,7 +520,7 @@ A few non-obvious things learned while wiring this into the block design:
 
 ---
 
-## 7. Current Status
+## 8. Current Status (superseded — see Section 6's checklist for the latest)
 
 ```
 ✓ figures2  — ACP vs HP0 vs SW baseline, clean results, analyzed
@@ -355,21 +534,21 @@ A few non-obvious things learned while wiring this into the block design:
   LOOP_FLATTEN fix, DSPs unchanged (~97), cosim PASS on both
   testbenches (42,830 cycles @ N=32), hardware clean at N=32..512
 ✓ N=4 correctness-check convention retired (N < FETCH_TILE is an
-  unsupported boundary case) — moved to N=32
+  unsupported boundary case) — moved to N=32, later to N=16
 ✓ Real ~44% latency reduction at N=512 confirmed on hardware
   (7.11s → 3.96s), consistent with analytical prediction
 ✓ figures5 benchmark README corrected after a stale-log discrepancy
   (33–40% HW v3 overstatement at every N in the first draft)
-□ Pending: apply the AXI-race bundle-split fix (dedicated B_T bundle,
-  num_write_outstanding=1) and re-test at larger N with many repeated
-  runs before treating the race as resolved — still the single
-  largest open correctness risk in the project
-□ Pending: final report incorporating all five benchmark rounds
 ```
+
+This checklist is out of date as of HW v4 (Section 6) — the AXI-race
+bundle-split fix below has since been designed *and applied*, but real
+correctness evidence at the benchmarked sizes still doesn't exist (see
+Section 6's own checklist for the accurate, current state).
 
 ---
 
-## 8. File Locations
+## 9. File Locations
 
 ```
 matmul_hls/matmul.cpp             HLS source (transpose + tiled matmul kernel)
