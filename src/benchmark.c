@@ -540,9 +540,9 @@ void run_benchmark_sweep(void)
     xil_printf("\r\n");
     xil_printf("# =====================================================\r\n");
 #if MATMUL_MODE == MATMUL_HW
-    xil_printf("# ACP vs HP0 vs HW-Matmul Benchmark — Zybo Z7-20\r\n");
+    xil_printf("# ACP vs HP0 vs HW-Matmul Benchmark - Zybo Z7-20\r\n");
 #else
-    xil_printf("# ACP vs HP0 vs SW-Matmul Benchmark — Zybo Z7-20\r\n");
+    xil_printf("# ACP vs HP0 vs SW-Matmul Benchmark - Zybo Z7-20\r\n");
 #endif
     xil_printf("# COUNTS_PER_SEC=%lu  REPEATS=%lu\r\n",
                (unsigned long)COUNTS_PER_SECOND, (unsigned long)REPEATS);

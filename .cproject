@@ -61,7 +61,7 @@
                                 								
                                 <option id="xilinx.gnu.compiler.symbols.defined.1101068343" name="Defined symbols (-D)" superClass="xilinx.gnu.compiler.symbols.defined" useByScannerDiscovery="false" valueType="definedSymbols">
                                     									
-                                    <listOptionValue builtIn="false" value="MATMUL_MODE=MATMUL_HW"/>
+                                    <listOptionValue builtIn="false" value="MATMUL_MODE=MATMUL_SW"/>
                                     								
                                 </option>
                                 								

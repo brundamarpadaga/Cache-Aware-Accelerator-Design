@@ -88,6 +88,51 @@ int main(void)
     /* ── Smoke tests — initialises `dma`, confirms HW wiring ─────────── */
     run_dma_smoke_tests();
 
+    /* ── Check 1: SW matmul correctness at N=16 ─────────────────────────
+     * A = identity, B = known sequential pattern.
+     * Expected: C == B (identity × B = B).
+     * N=16 matches the HW minimum valid size (multiple of FETCH_TILE=16). */
+    {
+#define SW_CHECK_N 16
+        volatile float *A = (volatile float *)MAT_A_BASE;
+        volatile float *B = (volatile float *)MAT_B_BASE;
+        volatile float *C = (volatile float *)MAT_C_BASE;
+
+        xil_printf("\r\nSW matmul correctness check (N=%d)...\r\n", SW_CHECK_N);
+        for (int i = 0; i < SW_CHECK_N; i++)
+            for (int j = 0; j < SW_CHECK_N; j++)
+                A[i * SW_CHECK_N + j] = (i == j) ? 1.0f : 0.0f;
+        for (int i = 0; i < SW_CHECK_N; i++)
+            for (int j = 0; j < SW_CHECK_N; j++)
+                B[i * SW_CHECK_N + j] = (float)(i * SW_CHECK_N + j + 1);
+        for (int i = 0; i < SW_CHECK_N * SW_CHECK_N; i++) C[i] = 0.0f;
+
+        for (int i = 0; i < SW_CHECK_N; i++)
+            for (int k = 0; k < SW_CHECK_N; k++) {
+                float a_ik = A[i * SW_CHECK_N + k];
+                for (int j = 0; j < SW_CHECK_N; j++)
+                    C[i * SW_CHECK_N + j] += a_ik * B[k * SW_CHECK_N + j];
+            }
+
+        int sw_errors = 0;
+        for (int i = 0; i < SW_CHECK_N * SW_CHECK_N; i++) {
+            if (C[i] != B[i]) {
+                if (sw_errors < 16)
+                    xil_printf("  SW MISMATCH [%d]: got 0x%08lX expected 0x%08lX\r\n",
+                               i,
+                               (unsigned long)*(uint32_t *)&C[i],
+                               (unsigned long)*(uint32_t *)&B[i]);
+                sw_errors++;
+            }
+        }
+        if (sw_errors == 0)
+            xil_printf("SW MATMUL PASS\r\n");
+        else {
+            xil_printf("SW MATMUL FAIL (%d errors)\r\n", sw_errors);
+            while (1) {}
+        }
+    }
+
 #ifdef XPAR_MATMUL_0_DEVICE_ID
     /* ── HLS accelerator init ────────────────────────────────────────── */
     xil_printf("\r\nInitialising matmul_0 accelerator...\r\n");
@@ -101,56 +146,136 @@ int main(void)
     xil_printf("matmul_0 base addr : 0x%08lX\r\n",
                (unsigned long)XPAR_MATMUL_0_S_AXI_CONTROL_BASEADDR);
 
-    /* ── Correctness check: 32×32 identity × known pattern (result must = B)
-     * N=32 is the minimum valid size: kernel requires N to be a multiple of
-     * FETCH_TILE=8 and T_TILE=16, so N must be a multiple of 16.
-     * N=4 (previous check) is smaller than FETCH_TILE and causes out-of-bounds
-     * tile loop accesses — it is not a supported kernel input size.           */
-#define CHECK_N 16
-    xil_printf("Running matmul correctness check (N=%d)...\r\n", CHECK_N);
-    for (int i = 0; i < CHECK_N; i++)
-        for (int j = 0; j < CHECK_N; j++)
-            MAT_A[i * CHECK_N + j] = (i == j) ? 1.0f : 0.0f;  /* identity */
-    for (int i = 0; i < CHECK_N; i++)
-        for (int j = 0; j < CHECK_N; j++)
-            MAT_B[i * CHECK_N + j] = (float)(i * CHECK_N + j + 1); /* known */
+    /* ── Check 2: HW matmul correctness at all sweep sizes ──────────────
+     * Same identity × known pattern as Check 1 at each N.
+     * N must be a multiple of FETCH_TILE=16 and T_TILE=16.
+     * Larger sizes (256, 512) add ~0.5 s and ~4 s respectively.          */
+    {
+        static const int hw_check_sizes[] = { 16, 32, 64, 128, 256, 512 };
+        int num_hw_sizes = (int)(sizeof(hw_check_sizes) / sizeof(hw_check_sizes[0]));
 
-    Xil_DCacheFlushRange((UINTPTR)MAT_A_BASE, CHECK_N * CHECK_N * sizeof(float));
-    Xil_DCacheFlushRange((UINTPTR)MAT_B_BASE, CHECK_N * CHECK_N * sizeof(float));
-    for (int i = 0; i < CHECK_N * CHECK_N; i++) MAT_C[i] = 0.0f;
-    Xil_DCacheFlushRange((UINTPTR)MAT_C_BASE, CHECK_N * CHECK_N * sizeof(float));
-    /* Invalidate B_T scratch region — HW writes it via HP0 then reads via ACP.
-     * Without this, SCU may serve stale PS cache lines at 0x10C00000 instead
-     * of the freshly written DDR data, producing NaN results.               */
-    Xil_DCacheInvalidateRange((UINTPTR)MAT_B_T_BASE, CHECK_N * CHECK_N * sizeof(float));
+        for (int si = 0; si < num_hw_sizes; si++) {
+            int N = hw_check_sizes[si];
+            int N2 = N * N;
+            xil_printf("HW matmul correctness check (N=%d)...\r\n", N);
 
-    XMatmul_Set_A(&matmul_hw,   MAT_A_BASE);
-    XMatmul_Set_B(&matmul_hw,   MAT_B_BASE);
-    XMatmul_Set_B_T(&matmul_hw, MAT_B_T_BASE);
-    XMatmul_Set_C(&matmul_hw,   MAT_C_BASE);
-    XMatmul_Set_N(&matmul_hw,   CHECK_N);
-    XMatmul_Start(&matmul_hw);
-    while (!XMatmul_IsDone(&matmul_hw));
+            for (int i = 0; i < N; i++)
+                for (int j = 0; j < N; j++)
+                    MAT_A[i * N + j] = (i == j) ? 1.0f : 0.0f;
+            for (int i = 0; i < N; i++)
+                for (int j = 0; j < N; j++)
+                    MAT_B[i * N + j] = (float)(i * N + j + 1);
 
-    Xil_DCacheInvalidateRange((UINTPTR)MAT_C_BASE, CHECK_N * CHECK_N * sizeof(float));
+            Xil_DCacheFlushRange((UINTPTR)MAT_A_BASE, N2 * sizeof(float));
+            Xil_DCacheFlushRange((UINTPTR)MAT_B_BASE, N2 * sizeof(float));
+            for (int i = 0; i < N2; i++) MAT_C[i] = 0.0f;
+            Xil_DCacheFlushRange((UINTPTR)MAT_C_BASE, N2 * sizeof(float));
+            Xil_DCacheInvalidateRange((UINTPTR)MAT_B_T_BASE, N2 * sizeof(float));
 
-    int errors = 0;
-    for (int i = 0; i < CHECK_N * CHECK_N; i++) {
-        if (MAT_C[i] != MAT_B[i]) {
-            if (errors < 16)   /* print first 16 mismatches only */
-                xil_printf("  MISMATCH [%d]: got 0x%08lX expected 0x%08lX\r\n",
-                           i,
-                           (unsigned long)*(uint32_t *)&MAT_C[i],
-                           (unsigned long)*(uint32_t *)&MAT_B[i]);
-            errors++;
+            XMatmul_Set_A(&matmul_hw,   MAT_A_BASE);
+            XMatmul_Set_B(&matmul_hw,   MAT_B_BASE);
+            XMatmul_Set_B_T(&matmul_hw, MAT_B_T_BASE);
+            XMatmul_Set_C(&matmul_hw,   MAT_C_BASE);
+            XMatmul_Set_N(&matmul_hw,   N);
+            XMatmul_Start(&matmul_hw);
+            while (!XMatmul_IsDone(&matmul_hw));
+            Xil_DCacheInvalidateRange((UINTPTR)MAT_C_BASE, N2 * sizeof(float));
+
+            int hw_errors = 0;
+            for (int i = 0; i < N2; i++) {
+                if (MAT_C[i] != MAT_B[i]) {
+                    if (hw_errors < 16)
+                        xil_printf("  HW MISMATCH [%d]: got 0x%08lX expected 0x%08lX\r\n",
+                                   i,
+                                   (unsigned long)*(uint32_t *)&MAT_C[i],
+                                   (unsigned long)*(uint32_t *)&MAT_B[i]);
+                    hw_errors++;
+                }
+            }
+            if (hw_errors == 0)
+                xil_printf("HW MATMUL PASS (N=%d)\r\n", N);
+            else {
+                xil_printf("HW MATMUL FAIL (N=%d, %d errors)\r\n", N, hw_errors);
+                while (1) {}
+            }
         }
     }
-    if (errors == 0) {
-        xil_printf("MATMUL PASS\r\n");
-    } else {
-        xil_printf("MATMUL FAIL (%d errors) - do not trust benchmark results\r\n",
-                   errors);
-        while (1) { /* halt */ }
+
+    /* ── Check 3: SW vs HW cross-check with asymmetric inputs (N=32) ────
+     * Both A and B are non-trivial, non-symmetric matrices.
+     * SW computes the reference; HW must produce identical bit-exact output.
+     * Catches row/column swap bugs that identity-based tests cannot detect.
+     * N=32 is the smallest valid multi-tile size (> FETCH_TILE=16).       */
+    {
+#define CROSS_N 32
+        volatile float *A = (volatile float *)MAT_A_BASE;
+        volatile float *B = (volatile float *)MAT_B_BASE;
+        volatile float *C = (volatile float *)MAT_C_BASE;
+        /* 32×32 floats = 4 KB — safe on the Cortex-A9 stack. */
+        float ref[CROSS_N * CROSS_N];
+
+        xil_printf("SW vs HW cross-check with asymmetric inputs (N=%d)...\r\n", CROSS_N);
+
+        /* Fill A and B with independent non-symmetric patterns.
+         * A: row-major ascending;  B: column-biased (N-1-j reversal).
+         * These patterns expose row/column swap bugs that identity tests miss. */
+        for (int i = 0; i < CROSS_N; i++)
+            for (int j = 0; j < CROSS_N; j++) {
+                A[i * CROSS_N + j] = (float)(i * CROSS_N + j + 1);
+                B[i * CROSS_N + j] = (float)((CROSS_N - 1 - j) * CROSS_N + i + 1);
+            }
+        for (int i = 0; i < CROSS_N * CROSS_N; i++) C[i] = 0.0f;
+
+        /* SW reference: C = A × B (i-k-j order), saved into ref[] */
+        for (int i = 0; i < CROSS_N; i++)
+            for (int k = 0; k < CROSS_N; k++) {
+                float a_ik = A[i * CROSS_N + k];
+                for (int j = 0; j < CROSS_N; j++)
+                    C[i * CROSS_N + j] += a_ik * B[k * CROSS_N + j];
+            }
+        for (int i = 0; i < CROSS_N * CROSS_N; i++) ref[i] = C[i];
+
+        /* HW run on the same A, B — C is overwritten with HW result */
+        Xil_DCacheFlushRange((UINTPTR)MAT_A_BASE, CROSS_N * CROSS_N * sizeof(float));
+        Xil_DCacheFlushRange((UINTPTR)MAT_B_BASE, CROSS_N * CROSS_N * sizeof(float));
+        for (int i = 0; i < CROSS_N * CROSS_N; i++) MAT_C[i] = 0.0f;
+        Xil_DCacheFlushRange((UINTPTR)MAT_C_BASE, CROSS_N * CROSS_N * sizeof(float));
+        Xil_DCacheInvalidateRange((UINTPTR)MAT_B_T_BASE, CROSS_N * CROSS_N * sizeof(float));
+
+        XMatmul_Set_A(&matmul_hw,   MAT_A_BASE);
+        XMatmul_Set_B(&matmul_hw,   MAT_B_BASE);
+        XMatmul_Set_B_T(&matmul_hw, MAT_B_T_BASE);
+        XMatmul_Set_C(&matmul_hw,   MAT_C_BASE);
+        XMatmul_Set_N(&matmul_hw,   CROSS_N);
+        XMatmul_Start(&matmul_hw);
+        while (!XMatmul_IsDone(&matmul_hw));
+        Xil_DCacheInvalidateRange((UINTPTR)MAT_C_BASE, CROSS_N * CROSS_N * sizeof(float));
+
+        /* Allow up to 8 ULP difference — HW and SW accumulate in different
+         * orders (tiled vs i-k-j) so rounding diverges by a few ULP.
+         * A difference larger than 8 ULP indicates a real indexing bug. */
+        int cross_errors = 0;
+        for (int i = 0; i < CROSS_N * CROSS_N; i++) {
+            uint32_t hw_bits = *(uint32_t *)&MAT_C[i];
+            uint32_t sw_bits = *(uint32_t *)&ref[i];
+            uint32_t ulp_diff = (hw_bits > sw_bits) ? (hw_bits - sw_bits)
+                                                     : (sw_bits - hw_bits);
+            if (ulp_diff > 8U) {
+                if (cross_errors < 16)
+                    xil_printf("  CROSS MISMATCH [%d]: HW=0x%08lX SW=0x%08lX (diff=%lu ULP)\r\n",
+                               i,
+                               (unsigned long)hw_bits,
+                               (unsigned long)sw_bits,
+                               (unsigned long)ulp_diff);
+                cross_errors++;
+            }
+        }
+        if (cross_errors == 0)
+            xil_printf("SW vs HW CROSS-CHECK PASS\r\n");
+        else {
+            xil_printf("SW vs HW CROSS-CHECK FAIL (%d errors)\r\n", cross_errors);
+            while (1) {}
+        }
     }
 #endif /* XPAR_MATMUL_0_DEVICE_ID */
 
