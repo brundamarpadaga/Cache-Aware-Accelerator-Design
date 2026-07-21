@@ -183,7 +183,7 @@ benchmark-app/
 │   ├── figures - no accelerator/        ← ACP + HP DMA baseline
 │   ├── figures2 - sw accelerator/       ← ACP + HP + SW matmul
 │   ├── figures3 - hw accelerator 1/     ← HW v1 untiled
-│   ├── figures4-hwAccelerator2-tiling/  ← HW v2 TILE=FETCH_TILE=4
+│   ├── figures4-hwAccelerator2-tiling/  ← HW v2 TILE=4
 │   ├── figures5-hwAccelerator3-tiling-v2/ ← HW v3 FETCH_TILE=8
 │   ├── figures6-hwAccelerator4-FetchTile16-bT-AXI/ ← HW v4 FETCH_TILE=16
 │   └── figures7-hwv4-vs-sw2/            ← latest: HW v5 vs SW
