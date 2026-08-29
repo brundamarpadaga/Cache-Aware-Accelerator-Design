@@ -1,6 +1,6 @@
-# Cache-Aware Accelerator Design: ACP vs HP0 and HLS Matrix Multiply on Zynq-7020
+# Tiled Matrix Multiply: ARM vs FPGA Accelerator on Zynq-7020
 
-> Benchmarking coherent vs non-coherent PS↔PL memory paths and a cache-aware tiled matrix multiply HLS accelerator on the Xilinx Zynq-7020 SoC.
+> A tiled matrix multiply HLS accelerator benchmarked against an ARM Cortex-A9 software baseline on the Xilinx Zynq-7020 SoC, with analysis of PS↔PL memory path coherency.
 
 **Board:** Digilent Zybo Z7-20 (XC7Z020-1CLG400C, 1GB DDR3)  
 **Toolchain:** Vivado 2022.2 · Vitis 2022.2 · arm-none-eabi-gcc  
@@ -10,13 +10,14 @@
 
 ## Project Overview
 
-This project has two parallel goals:
+A tiled matrix multiply kernel (`matmul_0`) is implemented in Vitis HLS on the Zynq-7020's programmable logic and benchmarked against a pure ARM Cortex-A9 software baseline. The accelerator achieves up to **4.89× speedup** over software at N=512.
 
-**1. Memory path comparison (ACP vs HP0)**  
-The Zynq-7020 exposes two distinct pathways for PL↔PS memory transfers. ACP routes through the Snoop Control Unit and participates in ARM cache coherency — no explicit cache management needed. HP0 bypasses the SCU and goes straight to DDR — higher raw bandwidth but requires explicit flush/invalidate or silent data corruption occurs. We benchmark both paths across matrix sizes N=32–512 using AXI DMA loopback.
+The key design choices that drive performance:
+- **Two-level tiling** — FETCH_TILE=16 controls DDR burst size, TILE=4 controls the unrolled MAC engine (16 DSP48s in parallel)
+- **B transpose** — B is transposed into a DDR scratch buffer before the multiply, converting strided column access into sequential row access for burst-friendly AXI reads
+- **ACP for reads, HP0 for writes** — the accelerator reads A and B via the coherent ACP port and writes C via the high-bandwidth HP0 port
 
-**2. HLS matrix multiply accelerator (SW vs HW)**  
-A tiled matrix multiply kernel (`matmul_0`) is implemented in Vitis HLS and benchmarked against a pure ARM software baseline. The accelerator uses two-level tiling (FETCH_TILE=16 for DDR burst efficiency, TILE=4 for the unrolled MAC engine), transposes B into a scratch buffer for sequential access, and routes reads via ACP and writes via HP0.
+The ACP and HP0 DMA loopback benchmarks are included as supporting context — they characterise the memory subsystem and motivate the cache flush/invalidate discipline the accelerator relies on.
 
 ---
 
