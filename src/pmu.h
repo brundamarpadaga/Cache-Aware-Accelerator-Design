@@ -12,14 +12,14 @@
 
 #include <stdint.h>
 
-/* ── PL310 L2 Cache Controller ───────────────────────────────────────────
- * Standalone PL310 on Zynq-7000 — not wired into Cortex-A9 PMU.
+/* --- PL310 L2 Cache Controller -------------------------------------------
+ * Standalone PL310 on Zynq-7000 - not wired into Cortex-A9 PMU.
  * Read via MMIO at L2CC base address (UG585 Table 4-1).
  *
- * CTR0 → DRREQ (data read requests = total L2 accesses)
- * CTR1 → DRHIT (data read hits)
+ * CTR0 -> DRREQ (data read requests = total L2 accesses)
+ * CTR1 -> DRHIT (data read hits)
  * L2 hit rate = DRHIT / DRREQ
- * ─────────────────────────────────────────────────────────────────────── */
+ * ----------------------------------------------------------------------- */
 #define L2CC_BASE       0xF8F02000UL
 #define L2CC_ECNTR_CTRL (*(volatile uint32_t *)(L2CC_BASE + 0x200))
 #define L2CC_ECFGR1     (*(volatile uint32_t *)(L2CC_BASE + 0x204))
@@ -27,9 +27,9 @@
 #define L2CC_ECNTR1     (*(volatile uint32_t *)(L2CC_BASE + 0x20C))
 #define L2CC_ECNTR0     (*(volatile uint32_t *)(L2CC_BASE + 0x210))
 
-/* Event source IDs — written to bits[7:2] of ECFGR */
-#define PL310_EVT_DRHIT (0x2U << 2)   /* 0x08 — data read hit     */
-#define PL310_EVT_DRREQ (0x3U << 2)   /* 0x0C — data read request */
+/* Event source IDs - written to bits[7:2] of ECFGR */
+#define PL310_EVT_DRHIT (0x2U << 2)   /* 0x08 - data read hit     */
+#define PL310_EVT_DRREQ (0x3U << 2)   /* 0x0C - data read request */
 
 typedef struct {
     uint32_t drreq;   /* total L2 data read accesses */
@@ -54,7 +54,7 @@ static inline void l2_read(l2_counts_t *c)
     c->drhit = L2CC_ECNTR1;
 }
 
-/* ── ARM PMU — L1 cache counters via CP15 ───────────────────────────────── */
+/* --- ARM PMU - L1 cache counters via CP15 -------------------------------- */
 #define PMU_EVT_L1D_MISS    0x03U
 #define PMU_EVT_L1D_ACCESS  0x04U
 
