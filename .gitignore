@@ -8,4 +8,7 @@ _ide/
 Debug/
 Release/
 
-# Analysis — track scripts, logs, and figures
+# Analysis — track scripts and logs; ignore locally-generated figures
+analysis/figures_dualcore/
+__pycache__/
+.pytest_cache/

@@ -1,0 +1,26 @@
+name: Dual-core parser tests
+
+# Scoped to this branch only — validates the plot_dualcore.py parsing logic
+# on every push. Plotting is done locally after each board run.
+on:
+  push:
+    branches:
+      - feature/freertos-dual-core
+    paths:
+      - 'analysis/plot_dualcore.py'
+      - 'analysis/tests/**'
+      - '.github/workflows/plots.yml'
+
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+
+      - run: pip install pytest
+
+      - run: pytest analysis/tests/ -v

@@ -120,8 +120,11 @@ static inline void uart_lock_acquire(void)
     volatile uint32_t *lk = (volatile uint32_t *)UART_LOCK_ADDR;
     uint32_t got, st;
     do {
-        do { __asm__ volatile("ldrex %0,[%1]" : "=r"(got) : "r"(lk)); }
-        while (got != 0U);
+        do {
+            __asm__ volatile("ldrex %0,[%1]" : "=r"(got) : "r"(lk));
+            if (got != 0U)
+                __asm__ volatile("clrex" ::: "memory"); /* release reservation while spinning */
+        } while (got != 0U);
         __asm__ volatile("strex %0,%2,[%1]"
             : "=r"(st) : "r"(lk), "r"(1U) : "memory");
     } while (st != 0U);
