@@ -207,6 +207,8 @@ static void TaskHWMatmul(void *pvParameters)
             uint32_t l2_rate_pct = (l2.drreq > 0U)
                 ? (uint32_t)((l2.drhit * 100ULL) / l2.drreq) : 0U;
 
+            taskENTER_CRITICAL();
+            uart_lock_acquire();
             xil_printf("MATMUL,%lu,%lu,"
                        "L1acc=%lu,L1miss=%lu,"
                        "L2req=%lu,L2hit=%lu,L2pct=%lu\r\n",
@@ -217,6 +219,8 @@ static void TaskHWMatmul(void *pvParameters)
                        (unsigned long)l2.drreq,
                        (unsigned long)l2.drhit,
                        (unsigned long)l2_rate_pct);
+            uart_lock_release();
+            taskEXIT_CRITICAL();
         }
 
         /* Wait for TaskPrefill to finish staging the next size, then swap */
@@ -276,7 +280,11 @@ static void TaskPrefill(void *pvParameters)
         Xil_DCacheFlushRange((UINTPTR)MAT_A_NEXT_BASE, bytes);
         Xil_DCacheFlushRange((UINTPTR)MAT_B_NEXT_BASE, bytes);
 
+        taskENTER_CRITICAL();
+        uart_lock_acquire();
         xil_printf("[Core0] TaskPrefill ready for N=%lu\r\n", (unsigned long)N);
+        uart_lock_release();
+        taskEXIT_CRITICAL();
         xSemaphoreGive(xPrefillDone);
     }
 }
@@ -312,8 +320,9 @@ int main(void)
      * Flush to DDR so Core 1's cache-invalidating poll sees the flag. */
     CORE1_CMD    = CORE1_CMD_IDLE;
     CORE1_STATUS = CORE1_STATUS_BUSY;
+    *(volatile uint32_t *)(UART_LOCK_ADDR) = 0U;  /* zero before Core 1 starts */
     CORE1_CMD    = CORE1_CMD_RUN;
-    Xil_DCacheFlushRange((UINTPTR)CORE1_COMM_BASE, 16UL);
+    Xil_DCacheFlushRange((UINTPTR)CORE1_COMM_BASE, 20UL);  /* includes UART_LOCK */
     __asm__ volatile("sev" ::: "memory");
 
     xil_printf("[Core0] Core1 signalled - starting FreeRTOS scheduler\r\n");

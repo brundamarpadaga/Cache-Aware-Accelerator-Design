@@ -106,4 +106,32 @@ static inline void pmu_read_all(pmu_counts_t *c)
     _pmu_sel(PMU_CTR_L1D_ACCESS); c->l1d_access = _pmu_rd_cnt();
 }
 
+/* --- Inter-core UART spinlock (LDREX/STREX) --------------------------------
+ * Lives at CORE1_COMM_BASE + 0x10 in shared DDR.
+ * The Cortex-A9 SCU tracks exclusive reservations between the two cores:
+ * any store to a monitored cache line by the other core clears the
+ * reservation, causing STREX to return 1 (fail) and the loop to retry.
+ * No explicit cache flush/invalidate is needed on the lock word itself.
+ * Core 0 must zero this word before signalling Core 1 (freertos_main.c). */
+#define UART_LOCK_ADDR  0x10F00010UL
+
+static inline void uart_lock_acquire(void)
+{
+    volatile uint32_t *lk = (volatile uint32_t *)UART_LOCK_ADDR;
+    uint32_t got, st;
+    do {
+        do { __asm__ volatile("ldrex %0,[%1]" : "=r"(got) : "r"(lk)); }
+        while (got != 0U);
+        __asm__ volatile("strex %0,%2,[%1]"
+            : "=r"(st) : "r"(lk), "r"(1U) : "memory");
+    } while (st != 0U);
+    __asm__ volatile("dmb" ::: "memory");   /* order all loads/stores after acquire */
+}
+
+static inline void uart_lock_release(void)
+{
+    __asm__ volatile("dmb" ::: "memory");   /* flush all stores before releasing */
+    *(volatile uint32_t *)UART_LOCK_ADDR = 0U;
+}
+
 #endif /* PMU_H */

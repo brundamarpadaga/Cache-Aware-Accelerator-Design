@@ -5,6 +5,7 @@
  *
  * @details
  * This file is the standalone application for ps7_cortexa9_1.
+ * .0
  * It is built as a separate Vitis application project (standalone BSP,
  * CPU1 domain) and loaded by the system project debugger alongside the
  * FreeRTOS CPU0 application.
@@ -81,7 +82,9 @@ int main(void)
     pmu_init();
     l2_init();
 
+    uart_lock_acquire();
     xil_printf("[Core1] Started SW matmul sweep\r\n");
+    uart_lock_release();
 
     XTime sweep_start, sweep_end;
     XTime_GetTime(&sweep_start);
@@ -132,6 +135,7 @@ int main(void)
             uint32_t l2_rate_pct = (l2.drreq > 0U)
                 ? (uint32_t)((l2.drhit * 100ULL) / l2.drreq) : 0U;
 
+            uart_lock_acquire();
             xil_printf("SW_CORE1,%lu,%lu,"
                        "L1acc=%lu,L1miss=%lu,L1pct=%lu,"
                        "L2req=%lu,L2hit=%lu,L2pct_approx=%lu\r\n",
@@ -143,6 +147,7 @@ int main(void)
                        (unsigned long)l2.drreq,
                        (unsigned long)l2.drhit,
                        (unsigned long)l2_rate_pct);
+            uart_lock_release();
         }
     }
 
@@ -155,8 +160,10 @@ int main(void)
     CORE1_STATUS = CORE1_STATUS_DONE;
     Xil_DCacheFlushRange((UINTPTR)CORE1_COMM_BASE, 16UL);
 
+    uart_lock_acquire();
     xil_printf("[Core1] SW sweep done. Total: %lu us\r\n",
                (unsigned long)CORE1_ELAPSED_US);
+    uart_lock_release();
 
     while (1)
         __asm__ volatile("wfe");
