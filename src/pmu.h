@@ -121,12 +121,12 @@ static inline void uart_lock_acquire(void)
     uint32_t got, st;
     do {
         do {
-            __asm__ volatile("ldrex %0,[%1]" : "=r"(got) : "r"(lk));
+            __asm__ volatile("ldrex %0,[%1]" : "=&r"(got) : "r"(lk));
             if (got != 0U)
                 __asm__ volatile("clrex" ::: "memory"); /* release reservation while spinning */
         } while (got != 0U);
         __asm__ volatile("strex %0,%2,[%1]"
-            : "=r"(st) : "r"(lk), "r"(1U) : "memory");
+            : "=&r"(st) : "r"(lk), "r"(1U) : "memory");
     } while (st != 0U);
     __asm__ volatile("dmb" ::: "memory");   /* order all loads/stores after acquire */
 }

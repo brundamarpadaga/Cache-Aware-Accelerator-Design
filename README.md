@@ -21,7 +21,7 @@ SW_CORE1,N,us,L1acc=...,L1miss=...,L1pct=...,L2req=...,L2hit=...,L2pct_approx=..
 - **`MATMUL`** — Core 0 measurement: time for `matmul_0` HLS accelerator to complete one N×N multiply, plus the Core 0 L1 PMU and shared L2 counters bracketing that run.
 - **`SW_CORE1`** — Core 1 measurement: time for the ARM i-k-j software loop to complete one N×N multiply, plus Core 1's own L1 PMU and the shared L2 counters.
 
-Both sweeps run sizes N = {32, 64, 128, 256, 512} × 5 repetitions. Total wall time ≈ 56 seconds (limited by the slower SW core; the HW core finishes inside the same window).
+Both sweeps run sizes N = {32, 64, 128, 256, 512} × 5 repetitions. Total wall time ≈ 56 seconds (limited by the slower SW core; the HW core finishes in ~5.2 seconds at 100 MHz PL).
 
 ---
 
@@ -67,23 +67,23 @@ The two cores share one L2 PL310 cache (512 KB). L1 caches (32 KB each) are priv
 
 | N | SW Core 1 (µs) | HW Core 0 (µs) | Speedup |
 |---|---------------|----------------|---------|
-| 32 | 2,420 | 678 | **3.57×** |
-| 64 | 19,121 | 4,587 | **4.17×** |
-| 128 | 152,722 | 33,414 | **4.57×** |
-| 256 | 1,218,858 | 254,583 | **4.79×** |
-| 512 | 9,741,659 | 1,990,307 | **4.89×** |
+| 32 | 2,421 | 351 | **6.90×** |
+| 64 | 19,241 | 2,349 | **8.19×** |
+| 128 | 153,317 | 17,001 | **9.02×** |
+| 256 | 1,221,845 | 129,516 | **9.43×** |
+| 512 | 9,741,665 | 1,035,794 | **9.41×** |
 
-Median of 5 repetitions. Speedup grows with N as the accelerator's DDR burst efficiency improves relative to the scalar ARM loop.
+Median of 5 repetitions. PL clock: 100 MHz. Speedup grows with N as the accelerator's DDR burst efficiency improves relative to the scalar ARM loop. Compared to the 50 MHz baseline, HW timings are ~2× faster while SW is unchanged (ARM runs at 650 MHz regardless of PL clock).
 
 ### Cache Behaviour
 
 | Core | Counter | N=128 | N=512 | Notes |
 |------|---------|-------|-------|-------|
-| Core 0 (HW) | L1 accesses | ~3.8 M | ~228 M | FreeRTOS polling overhead; no matmul L1 activity |
-| Core 0 (HW) | L1 misses | 0–3 | 0–3 | Confirms Core 0 is idle during accelerator |
-| Core 0 (HW) | L2 hit rate | 37–48% | 36% | ACP reads; drops when Core 1 also active |
+| Core 0 (HW) | L1 accesses | ~2.46 M | ~150 M | FreeRTOS polling overhead; no matmul L1 activity |
+| Core 0 (HW) | L1 misses | 0–2 | 0–4 | Confirms Core 0 is idle during accelerator |
+| Core 0 (HW) | L2 hit rate | 47–49% | 37% | ACP reads; drops at large N when Core 1 also active |
 | Core 1 (SW) | L1 hit rate | 99% | 99% | i-k-j reuse keeps working set in L1 |
-| Core 1 (SW) | L2 hit rate | 39–48% | 34–35% | Shared L2 — noisier under dual-core load |
+| Core 1 (SW) | L2 hit rate | 39–42% | 34% | Shared L2 — noisier under dual-core load |
 
 **L1 values are per-core accurate** (ARM CP15 PMU, private registers).  
 **L2 values are aggregate** — the PL310 event counters count traffic from both cores and the ACP accelerator reads. The `L2pct_approx` label on SW_CORE1 rows reflects this. L2 hit rates are lower than the single-core baseline because both cores thrash L2 simultaneously.
