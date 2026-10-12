@@ -10,7 +10,7 @@
 
 ## Project Overview
 
-A tiled matrix multiply kernel (`matmul_0`) is implemented in Vitis HLS on the Zynq-7020's programmable logic and benchmarked against a pure ARM Cortex-A9 software baseline. The accelerator achieves up to **4.89× speedup** over software at N=512.
+A tiled matrix multiply kernel (`matmul_0`) is implemented in Vitis HLS on the Zynq-7020's programmable logic and benchmarked against a pure ARM Cortex-A9 software baseline. The accelerator achieves up to **9.43× speedup** over software at N=256 (100 MHz PL clock).
 
 The key design choices that drive performance:
 - **Two-level tiling** — FETCH_TILE=16 controls DDR burst size, TILE=4 controls the unrolled MAC engine (16 DSP48s in parallel)
@@ -84,13 +84,13 @@ ACP is consistently faster than HP0 because cache-warm source data is served dir
 
 | N | ACP (µs) | HP (µs) | ACP/HP ratio |
 |---|----------|---------|-------------|
-| 32 | 33 | 57 | 0.58× |
-| 64 | 112 | 212 | 0.53× |
-| 128 | 429 | 828 | 0.52× |
-| 256 | 1,698 | 3,207 | 0.53× |
-| 512 | 6,773 | 10,656 | 0.64× |
+| 32 | 20 | 47 | 0.43× |
+| 64 | 68 | 178 | 0.38× |
+| 128 | 262 | 685 | 0.38× |
+| 256 | 1,040 | 2,552 | 0.41× |
+| 512 | 4,352 | 8,272 | 0.53× |
 
-ACP is ~1.5–1.9× faster than HP0 across all sizes.
+ACP is ~1.9–2.6× faster than HP0 across all sizes (100 MHz PL clock).
 
 ---
 
@@ -100,13 +100,13 @@ The HLS accelerator (`matmul_0`, FETCH_TILE=16, dedicated B_T AXI bundle) vs ARM
 
 | N | SW (µs) | HW (µs) | Speedup |
 |---|---------|---------|---------|
-| 32 | 2,421 | 686 | **3.53×** |
-| 64 | 19,122 | 4,613 | **4.15×** |
-| 128 | 152,664 | 33,544 | **4.55×** |
-| 256 | 1,218,448 | 255,160 | **4.78×** |
-| 512 | 9,740,419 | 1,993,182 | **4.89×** |
+| 32 | 2,421 | 358 | **6.76×** |
+| 64 | 19,122 | 2,376 | **8.05×** |
+| 128 | 152,664 | 17,101 | **8.93×** |
+| 256 | 1,218,448 | 129,644 | **9.40×** |
+| 512 | 9,740,419 | 1,032,866 | **9.43×** |
 
-Speedup grows with N as DDR bandwidth utilisation improves with larger tiles. L1 hit rate is 100% for both SW and HW at large N — the bottleneck is DDR bandwidth, and the accelerator wins by fetching larger bursts and reusing data more efficiently from BRAM.
+PL clock: 100 MHz. Speedup grows with N as DDR bandwidth utilisation improves with larger tiles. L1 hit rate is 100% for both SW and HW at large N — the bottleneck is DDR bandwidth, and the accelerator wins by fetching larger bursts and reusing data more efficiently from BRAM.
 
 ---
 
