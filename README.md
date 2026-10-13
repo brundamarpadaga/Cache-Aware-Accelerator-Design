@@ -162,6 +162,41 @@ The system project debugger loads both ELFs and releases both cores.
 
 ---
 
+## Hardware Setup
+
+### Physical Connections
+
+| Connection | Detail |
+|------------|--------|
+| Power | 5 V via USB or barrel jack (J15) |
+| JTAG / UART | USB micro-B (J13) — enumerates as two COM ports: JTAG (higher number) and UART |
+| Boot mode | JP5 jumper set to **JTAG** (all three pins shorted toward the USB connector) |
+
+Connect the board, open your terminal emulator on the UART COM port at **115200 8N1**, then launch the Vitis debugger — no SD card or bitfile programming step is needed for JTAG boot.
+
+### Vivado Block Design
+
+The pre-exported XSA is at `hardware/system_wrapper.xsa`. If you need to regenerate it (e.g. to change the PL clock):
+
+1. Open Vivado 2022.2, create a new project targeting **xc7z020clg400-1**.
+2. In the Tcl Console: `source hardware/system_bd.tcl` — this recreates the full block design.
+3. Key IPs in the block design:
+
+| IP | Instance | Notes |
+|----|----------|-------|
+| Zynq-7000 PS | `processing_system7_0` | DDR, UART0 (MIO), FCLK_CLK0 → 100 MHz |
+| HLS matmul | `matmul_0` | AXI-Lite control + ACP (read A/B) + HP0 (write C) + dedicated BT AXI (write B_T) |
+| AXI Interconnect | — | Routes PS ACP → matmul_0 and PS HP0 ← matmul_0 |
+| AXI DMA | `axi_dma_0` | Used by legacy DMA smoke tests only; not used in this benchmark |
+
+4. PL clock: FCLK_CLK0 is set to **100 MHz** in the PS7 re-customisation dialog (PS-PL Configuration → Clock Configuration → PL Fabric Clocks). This feeds `matmul_0`'s `ap_clk`.
+
+5. After any change: **Generate Bitstream → Export Hardware (include bitstream) → `hardware/system_wrapper.xsa`**.
+
+> **Note:** The ACP port on the matmul_0 accelerator is connected to the PS7 ACP slave — this gives the PL coherent access to the Cortex-A9 L2 cache without explicit cache flushes on the A matrices.
+
+---
+
 ## Vitis 2022.2 Setup (new machine)
 
 1. **Import XSA** — create a platform from `hardware/system_wrapper.xsa`.
